@@ -91,9 +91,21 @@
 
 .mushaf-page {
   margin: 0 auto 1.75rem; padding-bottom: .75rem; border-bottom: 1px solid var(--border);
+  /* Pages off screen are not laid out or painted (big memory/CPU saving for a
+     juz or a long surah: the colour glyphs are only rasterised when visible). */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 1100px;
 }
-/* Each page scrolls sideways on narrow screens so a mushaf line is never broken. */
-.mushaf-page-scroll { overflow-x: auto; overscroll-behavior-x: contain; padding-top: .4rem; }
+/* No scroll container on normal screens (no inner scrollbar). */
+.mushaf-page-scroll { padding-top: .4rem; }
+/* Narrow screens: a page may scroll sideways so a mushaf line is never broken,
+   but never vertically (no inner vertical scrollbar). */
+@media (max-width: 900px) {
+  .mushaf-page-scroll {
+    overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain;
+    padding-block: .4rem .6rem; scrollbar-width: thin;
+  }
+}
 .mushaf-lines {
   direction: rtl; width: fit-content; min-width: min(100%, var(--mushaf-line-width));
   margin-inline: auto; font-size: var(--mushaf-size);

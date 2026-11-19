@@ -188,32 +188,37 @@ fn js_string(s: &str) -> String {
 const PROBE_JS: &str = r##"
 const painted = (family, chars) => {
   if (!chars) return true;
-  let ctx;
-  try {
-    const c = document.createElement("canvas");
-    c.width = 160; c.height = 120;
-    ctx = c.getContext("2d", { willReadFrequently: true });
-  } catch (_) { return true; }
+  // One small canvas, reused across all probes (no per-glyph allocations).
+  let ctx = window.__qcfProbeCtx;
+  if (ctx === undefined) {
+    try {
+      const c = document.createElement("canvas");
+      c.width = 96; c.height = 80;
+      ctx = c.getContext("2d", { willReadFrequently: true });
+    } catch (_) { ctx = null; }
+    window.__qcfProbeCtx = ctx;
+  }
   if (!ctx) return true;
+  const W = 96, H = 80;
   const draw = (font, ch) => {
-    ctx.clearRect(0, 0, 160, 120);
+    ctx.clearRect(0, 0, W, H);
     ctx.font = font;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillStyle = "#000";
-    ctx.fillText(ch, 80, 60);
-    return ctx.getImageData(0, 0, 160, 120).data;
+    ctx.fillText(ch, W / 2, H / 2);
+    return ctx.getImageData(0, 0, W, H).data;
   };
   try {
     for (const ch of chars) {
       if (!ch.trim()) continue;
-      const a = draw(`48px "${family}", serif`, ch);
+      const a = draw(`32px "${family}", serif`, ch);
       let ink = false;
       for (let i = 3; i < a.length; i += 4) if (a[i] !== 0) { ink = true; break; }
       if (!ink) return false;
-      const b = draw("48px serif", ch);
+      const b = draw("32px serif", ch);
       let same = true;
-      for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { same = false; break; }
+      for (let i = 3; i < a.length; i += 4) if (a[i] !== b[i]) { same = false; break; }
       if (same) return false;
     }
     return true;

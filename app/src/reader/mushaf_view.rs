@@ -9,6 +9,8 @@
 //! - ayah end: `span.ayah-marker[data-location][data-verse-key][data-mode]` (not `.word`).
 //! - verse: `span.verse-anchor#verse-{key}[data-verse-key][data-word-count]` before its first word.
 
+use std::rc::Rc;
+
 use dioxus::prelude::*;
 use quran_api::{Chapter, Verse, VerseQuery};
 
@@ -113,7 +115,9 @@ pub(crate) fn MushafView(verses: ReadSignal<Vec<Verse>>, #[props(default)] trim:
     });
     let palette = use_memo(move || fonts::palette_css(font(), &FONTS.read().loaded_pages(font())));
 
-    let chapters: Vec<Chapter> = CHAPTERS.read().as_ref().map(|(_, list)| list.clone()).unwrap_or_default();
+    // Borrow the cached chapter list instead of cloning all 114 chapters per render.
+    let chapters_guard = CHAPTERS.read();
+    let chapters: &[Chapter] = chapters_guard.as_ref().map(|(_, list)| list.as_slice()).unwrap_or(&[]);
     let layout = layout.read();
     let verses = verses.read();
     let failed = failed();
@@ -140,8 +144,8 @@ pub(crate) fn MushafView(verses: ReadSignal<Vec<Verse>>, #[props(default)] trim:
             for (i, block) in layout.pages.iter().enumerate() {
                 PageView {
                     key: "{block_key(&layout.pages, i)}",
-                    block: block.clone(),
-                    headers: headers_for(block, &chapters),
+                    block: Rc::clone(block),
+                    headers: headers_for(block, chapters),
                     bismillah: if block_has_bismillah(block) { bismillah_verse() } else { None },
                     translations: if show_translations() { verses_for(block, &verses) } else { Vec::new() },
                     wbw: wbw(),
@@ -166,7 +170,7 @@ fn page_list(pages: &[u16]) -> String {
 }
 
 /// Stable key: page number plus how many earlier blocks had the same page.
-fn block_key(pages: &[PageBlock], i: usize) -> String {
+fn block_key(pages: &[Rc<PageBlock>], i: usize) -> String {
     let page = pages[i].page;
     let seen = pages[..i].iter().filter(|b| b.page == page).count();
     match page {
@@ -196,7 +200,7 @@ fn verses_for(block: &PageBlock, verses: &[Verse]) -> Vec<Verse> {
 
 #[component]
 fn PageView(
-    block: PageBlock,
+    block: Rc<PageBlock>,
     headers: Vec<Chapter>,
     bismillah: Option<Verse>,
     translations: Vec<Verse>,
@@ -241,7 +245,7 @@ fn PageView(
                                     "data-page": page_attr.clone(),
                                     "data-line": "{line}",
                                     for c in cells.iter() {
-                                        MushafWord { key: "{c.location}", cell: c.clone(), mode: mode_of(c), wbw }
+                                        Fragment { key: "{c.location}", {mushaf_word(c, mode_of(c), wbw)} }
                                     }
                                 }
                             },
@@ -262,7 +266,7 @@ fn PageView(
                                     }
                                     div { class: "mushaf-line flowing",
                                         for c in cells.iter() {
-                                            MushafWord { key: "{c.location}", cell: c.clone(), mode: mode_of(c), wbw }
+                                            Fragment { key: "{c.location}", {mushaf_word(c, mode_of(c), wbw)} }
                                         }
                                     }
                                 }
@@ -284,9 +288,11 @@ fn PageView(
 }
 
 /// One word or ayah-end marker, plus the verse anchor before a verse's first word.
-#[component]
-fn MushafWord(cell: WordCell, mode: WordMode, wbw: WbwOpts) -> Element {
-    let mut open = use_signal(|| false);
+///
+/// A plain function, not a component: a juz has thousands of words, and a scope
+/// plus a signal per word cost memory for no benefit. The tooltip (hover mode) is
+/// CSS-only: shown on hover and on focus (tap or Tab focuses the word).
+fn mushaf_word(cell: &WordCell, mode: WordMode, wbw: WbwOpts) -> Element {
     let page = cell.page.map(|p| p.to_string());
     let line = cell.line.map(|l| l.to_string());
     let anchor = cell.anchor.map(|count| {
@@ -352,12 +358,7 @@ fn MushafWord(cell: WordCell, mode: WordMode, wbw: WbwOpts) -> Element {
 
     if wbw.tooltip && has_extras {
         let tip_id = format!("wbw-tip-{}", cell.location.replace(':', "-"));
-        let class = match (missing, open()) {
-            (true, true) => "word word-missing has-tooltip is-open",
-            (true, false) => "word word-missing has-tooltip",
-            (false, true) => "word has-tooltip is-open",
-            (false, false) => "word has-tooltip",
-        };
+        let class = if missing { "word word-missing has-tooltip" } else { "word has-tooltip" };
         return rsx! {
             {anchor}
             span {
@@ -368,13 +369,6 @@ fn MushafWord(cell: WordCell, mode: WordMode, wbw: WbwOpts) -> Element {
                 "data-mode": mode.attr(),
                 tabindex: 0,
                 "aria-describedby": "{tip_id}",
-                onclick: move |_| open.toggle(),
-                onblur: move |_| open.set(false),
-                onkeydown: move |e: KeyboardEvent| match e.key() {
-                    Key::Escape => open.set(false),
-                    Key::Enter => open.toggle(),
-                    _ => {}
-                },
                 {text}
                 span { class: "word-tooltip", id: "{tip_id}", role: "tooltip", {extras} }
             }

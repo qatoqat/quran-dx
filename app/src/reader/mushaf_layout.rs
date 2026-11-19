@@ -4,6 +4,8 @@
 //! Nothing is ever dropped: a verse whose words lack line data (or whose word list
 //! is broken) becomes a [`Item::Flow`] block at its place in reading order.
 
+use std::rc::Rc;
+
 use quran_api::{Verse, Word};
 
 use super::glyph;
@@ -83,7 +85,8 @@ pub struct PageBlock {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Layout {
-    pub pages: Vec<PageBlock>,
+    /// Shared (`Rc`) so views pass pages around without copying every word.
+    pub pages: Vec<Rc<PageBlock>>,
 }
 
 /// Whether the shown words may start/end in the middle of a mushaf line
@@ -321,7 +324,7 @@ pub fn build_layout(verses: &[Verse], trim: Trim) -> Layout {
     }
 
     apply_trim(&mut pages, trim);
-    Layout { pages }
+    Layout { pages: pages.into_iter().map(Rc::new).collect() }
 }
 
 /// Un-justify the first/last line when the view may cut through them.
