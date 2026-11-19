@@ -69,6 +69,14 @@ loaded at runtime from `static-cdn.tarteel.ai`. QUL lists no licence information
 them, so they are not bundled. Until they are loaded and verified to draw the
 banner, the same content is shown as a plain framed line.
 
+**Decision: the banner stays on the first line of its surah.** In the printed mushaf, 18
+surahs (4, 10, 22, 23, 24, 26, 27, 32, 33, 37, 38, 45, 47, 53, 60, 64, 65, 80) begin on
+line 2 of a page with their banner printed as the last line of the page before. Here the
+banner is always drawn directly above its surah's first line, on the surah's own page.
+Those pages therefore show one row more than the print and the page before one row less;
+the text lines themselves are as printed. A banner at the bottom of a page that holds
+none of its surah was judged worse than this difference from the print.
+
 ## Requirements
 
 - Rust **1.100** (pinned in `rust-toolchain.toml`; rustup installs it and the
