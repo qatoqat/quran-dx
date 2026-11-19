@@ -7,12 +7,13 @@
 //   - every verse key is on the page, none extra, none duplicated
 //   - every word of every verse is rendered, in order, at its `c:v:position`
 //   - each word shows the right text: the QCF glyph (`code_v2`) when its page font
-//     loaded, otherwise the Unicode fallback (`qpc_uthmani_hafs`/`text_uthmani`)
+//     loaded, otherwise the Unicode fallback (its token of the verse's
+//     `qpc_uthmani_hafs`, or `text_uthmani`)
 //   - each word sits on the API's mushaf page and line (15-line layout)
 //   - glyph words use their own page's QCF font, and that font really contains
 //     the glyph (canvas check: inked, and different from a system-font letter)
 //   - exactly one ayah marker per verse, after its last word, with the right glyph
-//   - each surah header (and Bismillah, except surahs 1 and 9) sits directly
+//   - each surah banner (and Bismillah, except surahs 1 and 9) sits directly
 //     before that surah's first word
 //   - no `⟨?⟩` placeholders; words shown as Unicode fallback are reported
 //     separately (fonts not loading is a problem, but no word is lost)
@@ -90,18 +91,23 @@ async function expectedWords(apiPath, keep = () => true) {
   for (let page = 1; ; page++) {
     const data = await apiGet(apiPath, {
       words: "true", per_page: "50", page: String(page), language: "en", mushaf: String(MUSHAF_ID),
-      word_fields: "location,code_v2,v2_page,page_number,line_number,qpc_uthmani_hafs,text_uthmani",
+      fields: "qpc_uthmani_hafs",
+      word_fields: "location,code_v2,v2_page,page_number,line_number,text_uthmani",
     });
     if (!data.pagination) throw new Error(`no pagination in ${apiPath} page ${page}`);
     for (const v of data.verses) {
       if (!keep(v)) continue;
       const end = v.words.find((w) => w.char_type_name === "end");
       ENDS.set(v.verse_key, norm(end?.code_v2 ?? ""));
-      out.set(v.verse_key, v.words.filter((w) => w.char_type_name !== "end").map((w) => ({
+      // The API has QPC Hafs text per verse only: one whitespace-separated token per
+      // word (the last one is the ayah number), when the counts line up.
+      const tokens = (v.qpc_uthmani_hafs ?? "").split(/\s+/).filter(Boolean);
+      const qpc = tokens.length === v.words.length ? tokens : null;
+      out.set(v.verse_key, v.words.map((w, i) => ({ w, i })).filter(({ w }) => w.char_type_name !== "end").map(({ w, i }) => ({
         location: w.location ?? `${v.verse_key}:${w.position}`,
         glyph: norm(w.code_v2 ?? ""),
-        text: norm(w.qpc_uthmani_hafs ?? w.text_uthmani ?? w.text ?? ""),
-        alt: norm(w.text_uthmani ?? w.text ?? ""),
+        text: norm(qpc?.[i] ?? w.text_uthmani ?? ""),
+        alt: norm(w.text_uthmani ?? ""),
         page: w.page_number ?? null,
         line: w.line_number ?? null,
       })));
@@ -116,7 +122,7 @@ const norm = (s) => s.normalize("NFC").replace(/\s+/g, " ").trim();
 
 /** Load every verse of the surah in the page (clicking "Load more" as needed). */
 async function loadAll(page, expectedCount) {
-  const count = () => page.locator(".verse-anchor[data-verse-key]").count();
+  const count = () => page.locator("[data-word-count]").count();
   let last = -1;
   let stalledSince = Date.now();
   while (true) {
@@ -166,19 +172,37 @@ async function rendered(page) {
       }
       return true;
     };
+    // Same "cut off" rule as the app's audit: the whole word (with meanings) must be
+    // inside the window and inside every ancestor that clips.
+    const cutOff = (node) => {
+      const r = node.getBoundingClientRect();
+      const vw = document.documentElement.clientWidth;
+      if (r.left < -1 || r.right > vw + 1) return "outside the window";
+      for (let n = node.parentElement; n && n !== document.documentElement; n = n.parentElement) {
+        const cs = getComputedStyle(n);
+        const clips = /hidden|clip/.test(cs.overflowX + " " + cs.overflowY)
+          || /paint|strict|content/.test(cs.contain || "") || cs.contentVisibility === "auto" || cs.contentVisibility === "hidden";
+        if (!clips) continue;
+        const a = n.getBoundingClientRect();
+        if (r.left < a.left - 1 || r.right > a.right + 1 || r.top < a.top - 1 || r.bottom > a.bottom + 1) return "partly outside its page";
+      }
+      return null;
+    };
     const firstFamily = (el) => getComputedStyle(el).fontFamily.split(",")[0].trim().replace(/^["']|["']$/g, "");
 
-    const anchors = [...document.querySelectorAll(".verse-anchor[data-verse-key]")].map((a) => ({
-      key: a.dataset.verseKey,
+    // A word's (or marker's) Arabic text is its own text; meanings are child elements.
+    const own = (el) => [...el.childNodes].filter((n) => n.nodeType === Node.TEXT_NODE).map((n) => n.data).join("");
+    // A verse's first word carries its anchor: `id="verse-c:v"` and the verse's word count.
+    const anchors = [...document.querySelectorAll("[data-word-count]")].map((a) => ({
+      key: a.dataset.location.split(":").slice(0, 2).join(":"),
       declared: Number(a.dataset.wordCount),
     }));
     // Document order of everything we check positions of.
-    const ordered = [...document.querySelectorAll(".word[data-location], .ayah-marker[data-verse-key], .surah-header-line[data-chapter], .bismillah-line")];
+    const ordered = [...document.querySelectorAll(".word[data-location], .ayah-marker[data-verse-key], .surah-banner[data-chapter], .bismillah")];
     const index = new Map(ordered.map((el, i) => [el, i]));
     const words = [...document.querySelectorAll(".word[data-location]")].map((w) => {
-      const t = w.querySelector(".word-text") ?? w;
-      const text = t.textContent;
-      const family = w.dataset.mode === "glyph" ? firstFamily(t.querySelector(".glyph-text") ?? t) : null;
+      const text = own(w);
+      const family = w.dataset.mode === "glyph" ? firstFamily(w) : null;
       return {
         location: w.dataset.location,
         mode: w.dataset.mode,
@@ -187,32 +211,33 @@ async function rendered(page) {
         text,
         family,
         covered: family ? covers(family, text.trim()) : null,
+        cut: cutOff(w),
         order: index.get(w),
       };
     });
     const markers = [...document.querySelectorAll(".ayah-marker[data-verse-key]")].map((m) => {
-      const glyphEl = m.querySelector(".glyph-text");
-      const text = (glyphEl ?? m.querySelector(".word-text") ?? m).textContent;
-      const family = m.dataset.mode === "glyph" ? firstFamily(glyphEl ?? m) : null;
+      const glyph = m.dataset.mode === "glyph";
+      const text = own(m);
+      const family = glyph ? firstFamily(m) : null;
       return {
         key: m.dataset.verseKey,
         mode: m.dataset.mode,
         page: m.dataset.page ? Number(m.dataset.page) : null,
-        text: glyphEl ? glyphEl.textContent : null,
+        text: glyph ? text : null,
         family,
-        covered: family && glyphEl ? covers(family, glyphEl.textContent.trim()) : null,
+        covered: glyph ? covers(family, text.trim()) : null,
         order: index.get(m),
       };
     });
-    const headers = [...document.querySelectorAll(".surah-header-line[data-chapter]")].map((h) => {
-      // The next checked element after the header, skipping a Bismillah line.
+    const headers = [...document.querySelectorAll(".surah-banner[data-chapter]")].map((h) => {
+      // The next checked element after the banner, skipping a Bismillah line.
       let i = index.get(h) + 1;
-      const bismillah = ordered[i]?.classList.contains("bismillah-line") ?? false;
+      const bismillah = ordered[i]?.classList.contains("bismillah") ?? false;
       if (bismillah) i++;
       const next = ordered[i];
       return { chapter: Number(h.dataset.chapter), bismillah, next: next?.dataset?.location ?? null };
     });
-    const missingPlaceholders = document.querySelectorAll(".word-missing").length;
+    const missingPlaceholders = document.querySelectorAll(".word.missing").length;
     // The app's own on-screen audit (render_audit.rs) marks failed words.
     const auditFailures = [...document.querySelectorAll(".word-render-error")].map((b) =>
       `${b.closest("[data-location]")?.dataset.location ?? "?"}: ${b.getAttribute("aria-label") ?? ""}`);
@@ -226,7 +251,7 @@ async function checkView(page, view) {
   const at = view.label;
   const expected = await view.expected();
   await page.goto(`${BASE}${view.path}`, { waitUntil: "domcontentloaded" });
-  await page.waitForSelector(".verse-anchor[data-verse-key]", { timeout: LOAD_TIMEOUT_MS }).catch(() => {});
+  await page.waitForSelector("[data-word-count]", { timeout: LOAD_TIMEOUT_MS }).catch(() => {});
   const loaded = await loadAll(page, expected.size);
   // Give page fonts a moment so glyph mode can kick in before we read the DOM.
   await page.evaluate(() => document.fonts.ready).catch(() => {});
@@ -277,6 +302,7 @@ async function checkView(page, view) {
         fallbackWords++;
         if (text !== e.text && text !== e.alt) problems.push({ at, key, kind: "word-text", detail: `${e.location}: rendered "${text}", expected "${e.text}"` });
       }
+      if (g.cut) problems.push({ at, key, kind: "cut-off", detail: `${e.location}: ${g.cut}` });
       if (e.page != null && g.page !== e.page) problems.push({ at, key, kind: "page", detail: `${e.location}: on page ${g.page}, API ${e.page}` });
       if (e.line != null && g.line !== e.line) problems.push({ at, key, kind: "line", detail: `${e.location}: on line ${g.line}, API ${e.line}` });
     }

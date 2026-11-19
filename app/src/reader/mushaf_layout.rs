@@ -12,7 +12,7 @@ use super::glyph;
 use super::integrity::{self, word_layout};
 
 /// One drawable word (or ayah-end marker) with everything the renderer needs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct WordCell {
     /// `"chapter:verse:position"`.
     pub location: String,
@@ -24,11 +24,13 @@ pub struct WordCell {
     pub is_end: bool,
     /// QCF glyph code, only if it belongs to `page`'s font.
     pub glyph: Option<String>,
-    /// Unicode text (`qpc_uthmani_hafs` → `text_uthmani` → `text`).
+    /// Unicode text for when the glyph can't be drawn; for the end marker, the ayah number.
     pub text: Option<String>,
+    /// `text` is in the QPC Hafs encoding (drawn with the Hafs fallback font).
+    pub qpc: bool,
     pub translation: Option<String>,
     pub transliteration: Option<String>,
-    /// On a verse's first cell: render the verse anchor, with this many words.
+    /// On a verse's first cell: the verse's word count (the cell is the verse's anchor).
     pub anchor: Option<usize>,
 }
 
@@ -174,7 +176,21 @@ fn non_empty(t: Option<&quran_api::WordText>) -> Option<String> {
     t?.text.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from)
 }
 
-fn word_cell(v: &Verse, w: &Word, layout: Option<(u16, u16)>) -> WordCell {
+/// The verse's QPC Hafs text split into one token per word (the end marker's
+/// token is the ayah number), if it lines up with the word list. The API only
+/// has this text per verse.
+fn qpc_tokens(v: &Verse) -> Option<Vec<&str>> {
+    let tokens: Vec<&str> = v.qpc_uthmani_hafs.as_deref()?.split_whitespace().collect();
+    (tokens.len() == v.words.len()).then_some(tokens)
+}
+
+fn word_cell(v: &Verse, w: &Word, layout: Option<(u16, u16)>, qpc: Option<&str>) -> WordCell {
+    let (text, qpc) = match (qpc, glyph::unicode_text(w)) {
+        (Some(t), _) => (Some(t.to_string()), true),
+        (None, Some((t, qpc))) => (Some(t), qpc),
+        (None, None) if w.is_end_marker() => (Some(glyph::arabic_number(v.verse_number)), false),
+        (None, None) => (None, false),
+    };
     WordCell {
         location: format!("{}:{}", v.verse_key, w.position),
         verse_key: v.verse_key.clone(),
@@ -188,7 +204,8 @@ fn word_cell(v: &Verse, w: &Word, layout: Option<(u16, u16)>) -> WordCell {
             Some(font_page) if font_page != page => None,
             _ => glyph::glyph_code(w),
         }),
-        text: glyph::unicode_text(w),
+        text,
+        qpc,
         translation: if w.is_end_marker() { None } else { non_empty(w.translation.as_ref()) },
         transliteration: if w.is_end_marker() { None } else { non_empty(w.transliteration.as_ref()) },
         anchor: None,
@@ -213,24 +230,16 @@ fn resolve_layout(v: &Verse) -> Option<Vec<(u16, u16)>> {
 /// Cells for a verse shown as flowing text.
 fn flow_cells(v: &Verse, reason: FlowReason) -> Vec<WordCell> {
     let mut cells: Vec<WordCell> = match reason {
-        FlowReason::NoLayout => v.words.iter().map(|w| word_cell(v, w, None)).collect(),
+        FlowReason::NoLayout => {
+            let qpc = qpc_tokens(v);
+            v.words.iter().enumerate().map(|(i, w)| word_cell(v, w, None, qpc.as_ref().map(|t| t[i]))).collect()
+        }
         FlowReason::VerseText => {
             let tokens: Vec<&str> = integrity::verse_text(v, "text_uthmani")
                 .map(|t| t.split_whitespace().collect())
                 .unwrap_or_default();
-            let blank = WordCell {
-                location: String::new(),
-                verse_key: v.verse_key.clone(),
-                verse_number: v.verse_number,
-                page: None,
-                line: None,
-                is_end: false,
-                glyph: None,
-                text: None,
-                translation: None,
-                transliteration: None,
-                anchor: None,
-            };
+            let blank =
+                WordCell { verse_key: v.verse_key.clone(), verse_number: v.verse_number, ..WordCell::default() };
             let mut cells: Vec<WordCell> = tokens
                 .iter()
                 .enumerate()
@@ -245,7 +254,12 @@ fn flow_cells(v: &Verse, reason: FlowReason) -> Vec<WordCell> {
                 cells.push(WordCell { location: format!("{}:1", v.verse_key), ..blank.clone() });
             }
             let n = cells.len();
-            cells.push(WordCell { location: format!("{}:{}", v.verse_key, n + 1), is_end: true, ..blank });
+            cells.push(WordCell {
+                location: format!("{}:{}", v.verse_key, n + 1),
+                is_end: true,
+                text: Some(glyph::arabic_number(v.verse_number)),
+                ..blank
+            });
             cells
         }
     };
@@ -295,6 +309,7 @@ pub fn build_layout(verses: &[Verse], trim: Trim) -> Layout {
         };
 
         let word_count = integrity::word_count(v);
+        let qpc = qpc_tokens(v);
         let mut header_pending = starts_surah;
         for (i, (w, &(page, line))) in v.words.iter().zip(&slots).enumerate() {
             if pages.last().is_none_or(|b| b.page != Some(page)) {
@@ -312,7 +327,7 @@ pub fn build_layout(verses: &[Verse], trim: Trim) -> Layout {
                 block.items.push(Item::Line { line, cells: Vec::new(), align });
                 cur = Some((page, line));
             }
-            let mut cell = word_cell(v, w, Some((page, line)));
+            let mut cell = word_cell(v, w, Some((page, line)), qpc.as_ref().map(|t| t[i]));
             if i == 0 {
                 cell.anchor = Some(word_count);
                 block.verse_keys.push(v.verse_key.clone());
@@ -490,7 +505,7 @@ mod tests {
         let Item::Flow { cells, reason, .. } = &l.pages[0].items[0] else { panic!() };
         assert_eq!(*reason, FlowReason::VerseText);
         let texts: Vec<_> = cells.iter().map(|c| c.text.clone().unwrap_or_default()).collect();
-        assert_eq!(texts, ["a", "b", "c", ""]);
+        assert_eq!(texts, ["a", "b", "c", "٧"]);
         assert!(cells[3].is_end);
         assert_eq!(cells[0].anchor, Some(3));
         // No text at all: a placeholder word, still anchored.
@@ -538,6 +553,33 @@ mod tests {
         let l = build_layout(&[verse("2:3", &[(2, 8), (2, 8)])], Trim { start: true, end: true });
         assert!(matches!(l.pages[0].items[0], Item::Line { align: LineAlign::Center, .. }));
         assert!(is_centered_line(604, 15) && !is_centered_line(604, 1) && is_centered_line(2, 1));
+    }
+
+    #[test]
+    fn verse_level_qpc_text_is_split_per_word() {
+        let mut v = verse("2:4", &[(2, 14), (2, 14), (2, 15)]);
+        for w in &mut v.words {
+            w.qpc_uthmani_hafs = None;
+            w.text_uthmani = Some("u".into());
+        }
+        v.qpc_uthmani_hafs = Some("بِسۡمِ ٱللَّهِ\u{a0}٤".into());
+        let l = build_layout(std::slice::from_ref(&v), Trim::default());
+        let cells: Vec<&WordCell> = l
+            .pages
+            .iter()
+            .flat_map(|p| &p.items)
+            .flat_map(|i| if let Item::Line { cells, .. } = i { cells.as_slice() } else { &[] })
+            .collect();
+        let texts: Vec<_> = cells.iter().map(|c| (c.text.as_deref().unwrap(), c.qpc)).collect();
+        assert_eq!(texts, [("بِسۡمِ", true), ("ٱللَّهِ", true), ("٤", true)]);
+        // Token count differs from the word count: plain Uthmani text, plain ayah number.
+        v.qpc_uthmani_hafs = Some("بِسۡمِ ٤".into());
+        v.words[2].text_uthmani = None;
+        let l = build_layout(&[v], Trim::default());
+        let Item::Line { cells, .. } = &l.pages[0].items[1] else { panic!() };
+        assert_eq!((cells[0].text.as_deref(), cells[0].qpc), (Some("٤"), false));
+        let Item::Line { cells, .. } = &l.pages[0].items[0] else { panic!() };
+        assert_eq!((cells[0].text.as_deref(), cells[0].qpc), (Some("u"), false));
     }
 
     #[test]

@@ -12,23 +12,25 @@ quran-api.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-# web-only
-web-sys = { version = "0.3", optional = true, features = ["Window", "Storage", "Document", "Element", "HtmlElement"] }
-gloo-timers = { version = "0.4", optional = true, features = ["futures"] }
+# Browser (wasm) only.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Window", "Storage"] }
+gloo-timers = { version = "0.4", features = ["futures"] }
 
-# desktop-only
-dirs = { version = "7", optional = true }
-tokio = { version = "1", optional = true, features = ["time"] }
-# Desktop: download QCF font bytes natively (webview cross-origin font loads may be blocked).
-reqwest = { workspace = true, optional = true }
+# Native (desktop) only.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dirs = "7"
+tokio = { version = "1", features = ["time"] }
+
+# `dx serve --platform web|desktop` picks the matching feature by itself.
+# The window's own GTK handle, to give it the desktop's native frame (see main.rs).
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
 
 [features]
-default = ["web"]
-web = ["dioxus/web", "dep:web-sys", "dep:gloo-timers"]
-desktop = ["dioxus/desktop", "dep:dirs", "dep:tokio", "native-fonts"]
-# Native (non-wasm) font download; enabled by `desktop`. Separate so it can be
-# type-checked without the desktop (GTK) stack.
-native-fonts = ["dep:reqwest"]
+default = ["desktop"]
+web = ["dioxus/web"]
+desktop = ["dioxus/desktop"]
 
 [dev-dependencies]
 dioxus-ssr = "0.7.10"

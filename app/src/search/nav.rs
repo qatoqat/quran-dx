@@ -33,15 +33,15 @@ pub enum NavTarget {
 impl NavTarget {
     pub fn route(self) -> Route {
         match self {
-            NavTarget::Chapter(c) => Route::ChapterPage { chapter: c.to_string() },
+            NavTarget::Chapter(c) => Route::surah(c),
             NavTarget::Verse { chapter, verse } => {
-                Route::ChapterRange { chapter: chapter.to_string(), range: verse.to_string() }
+                Route::verses(chapter, verse)
             }
             NavTarget::Range { chapter, from, to } => {
-                Route::ChapterRange { chapter: chapter.to_string(), range: format!("{from}-{to}") }
+                Route::verses(chapter, format!("{from}-{to}"))
             }
-            NavTarget::Page(page) => Route::MushafPage { page },
-            NavTarget::Juz(juz) => Route::JuzPage { juz },
+            NavTarget::Page(page) => Route::page(page),
+            NavTarget::Juz(juz) => Route::juz(juz),
         }
     }
 
@@ -461,15 +461,15 @@ mod tests {
     #[test]
     fn routes_and_labels() {
         let s = parse("2:255", &sample_chapters());
-        assert_eq!(s[0].route(), Route::ChapterRange { chapter: "2".into(), range: "255".into() });
+        assert_eq!(s[0].route(), Route::verses("2", "255"));
         assert_eq!(s[0].label, "Surah Al-Baqarah (The Cow), verse 255");
         assert_eq!(
             NavTarget::Range { chapter: 2, from: 1, to: 5 }.route(),
-            Route::ChapterRange { chapter: "2".into(), range: "1-5".into() }
+            Route::verses("2", "1-5")
         );
-        assert_eq!(NavTarget::Chapter(18).route(), Route::ChapterPage { chapter: "18".into() });
-        assert_eq!(NavTarget::Page(3).route(), Route::MushafPage { page: 3 });
-        assert_eq!(NavTarget::Juz(30).route(), Route::JuzPage { juz: 30 });
+        assert_eq!(NavTarget::Chapter(18).route(), Route::surah("18"));
+        assert_eq!(NavTarget::Page(3).route(), Route::page(3));
+        assert_eq!(NavTarget::Juz(30).route(), Route::juz(30));
         assert_eq!(parse("18", &[])[0].label, "Surah 18");
     }
 

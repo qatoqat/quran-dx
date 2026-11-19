@@ -11,26 +11,27 @@ use quran_api::Chapter;
 use super::feed::{VerseList, VerseSource};
 use super::mushaf_layout::Trim;
 use super::parse::{self, CHAPTER_COUNT, VerseRef, VerseSpan};
-use super::{PrevNext, Redirect, SurahHeading, chapter_route, find_chapter, use_chapters, use_scroll_to_top};
+use super::{PrevNext, Redirect, chapter_route, find_chapter, use_chapters, use_scroll_to_top};
 use crate::Route;
 use crate::layout::{ErrorBox, Loading};
+use crate::route::Anchor;
 
 #[component]
-pub fn ChapterPage(chapter: String) -> Element {
+pub fn ChapterPage(chapter: String, at: Anchor) -> Element {
     let parsed = parse::parse_chapter_segment(&chapter);
     if parsed.is_err() && parse::looks_like_slug(&chapter) {
         return rsx! { SlugRedirect { key: "{chapter}", slug: chapter.clone(), range: None } };
     }
-    resolve(parsed, &chapter)
+    resolve(parsed, &chapter, at)
 }
 
 #[component]
-pub fn ChapterRange(chapter: String, range: String) -> Element {
+pub fn ChapterRange(chapter: String, range: String, at: Anchor) -> Element {
     if parse::parse_chapter_number(&chapter).is_err() && parse::looks_like_slug(&chapter) {
         let key = format!("{chapter}/{range}");
         return rsx! { SlugRedirect { key: "{key}", slug: chapter.clone(), range: Some(range.clone()) } };
     }
-    resolve(parse::parse_chapter_and_range(&chapter, &range), &format!("{chapter}/{range}"))
+    resolve(parse::parse_chapter_and_range(&chapter, &range), &format!("{chapter}/{range}"), at)
 }
 
 /// `/an-najm[/range]` → `/53[/range]` once the chapter list is known.
@@ -47,8 +48,8 @@ fn SlugRedirect(slug: String, range: Option<String>) -> Element {
         None => rsx! { InvalidReference { message: "No surah called “{slug}” was found." } },
         Some(id) => {
             let to = match range {
-                None => Route::ChapterPage { chapter: id.to_string() },
-                Some(range) => Route::ChapterRange { chapter: id.to_string(), range },
+                None => Route::surah(id),
+                Some(range) => Route::verses(id, range),
             };
             rsx! { Redirect { key: "{to}", to } }
         }
@@ -56,15 +57,15 @@ fn SlugRedirect(slug: String, range: Option<String>) -> Element {
 }
 
 /// Show the reference, or redirect when the URL isn't in canonical form.
-fn resolve(parsed: Result<VerseRef, parse::ParseError>, path: &str) -> Element {
+fn resolve(parsed: Result<VerseRef, parse::ParseError>, path: &str, at: Anchor) -> Element {
     match parsed {
         Err(e) => rsx! { InvalidReference { message: e.to_string() } },
         Ok(r) => {
             let canonical = r.canonical_path();
             if canonical != path {
-                rsx! { Redirect { key: "{canonical}", to: chapter_route(r.chapter, r.span) } }
+                rsx! { Redirect { key: "{canonical}", to: chapter_route(r.chapter, r.span).with_anchor(at) } }
             } else {
-                rsx! { ChapterView { key: "{canonical}", chapter: r.chapter, span: r.span } }
+                rsx! { ChapterView { key: "{canonical}", chapter: r.chapter, span: r.span, at } }
             }
         }
     }
@@ -81,7 +82,7 @@ fn InvalidReference(message: String) -> Element {
 }
 
 #[component]
-fn ChapterView(chapter: u16, span: Option<VerseSpan>) -> Element {
+fn ChapterView(chapter: u16, span: Option<VerseSpan>, at: Anchor) -> Element {
     use_scroll_to_top((chapter, span));
     let chapters = use_chapters();
     let list = match &*chapters.read() {
@@ -115,7 +116,6 @@ fn ChapterView(chapter: u16, span: Option<VerseSpan>) -> Element {
 
     let full = VerseSpan { from: 1, to: info.verses_count.max(1) };
     let source = VerseSource::Chapter { chapter, span };
-    let source_key = format!("{chapter}-{}", span.map(|s| s.segment()).unwrap_or_default());
     // A range may start/end mid-line: don't stretch those lines edge to edge.
     let trim = Trim {
         start: span.is_some_and(|s| s.from > 1),
@@ -124,22 +124,21 @@ fn ChapterView(chapter: u16, span: Option<VerseSpan>) -> Element {
     let (prev, next, middle) = navigation(&info, &list, span);
 
     rsx! {
-        section { class: "chapter-view",
-            // The surah header and Bismillah lines are drawn inside the mushaf page.
-            SurahHeading { chapter: info.clone(), large: true }
-            if let Some(s) = span {
-                p { class: "range-info",
-                    if s.is_single() {
-                        "Verse {s.from} of {info.verses_count} · "
-                    } else {
-                        "Verses {s.from}–{s.to} of {info.verses_count} · "
-                    }
-                    Link { to: chapter_route(chapter, None), "Read the full surah" }
+        document::Title { "{info.name_simple} – The Noble Quran" }
+        // The surah's name, place and verse count are on its banner inside the mushaf
+        // page; a range that starts later has no banner, so it is named here.
+        if let Some(s) = span {
+            p { class: "range-info",
+                if s.is_single() {
+                    "{info.name_simple} · Verse {s.from} of {info.verses_count} · "
+                } else {
+                    "{info.name_simple} · Verses {s.from}–{s.to} of {info.verses_count} · "
                 }
+                Link { to: chapter_route(chapter, None), "Read the full surah" }
             }
-            VerseList { key: "{source_key}", source, expected: vec![(chapter, span.unwrap_or(full))], trim }
-            PrevNext { prev, next, middle }
         }
+        VerseList { source, expected: vec![(chapter, span.unwrap_or(full))], trim, start: at }
+        PrevNext { prev, next, middle }
     }
 }
 
@@ -161,9 +160,8 @@ fn navigation(info: &Chapter, list: &[Chapter], span: Option<VerseSpan>) -> (Nav
         return (prev, next, full);
     }
     let surah = |n: u16| {
-        let name =
-            find_chapter(list, n).map(|c| c.name_simple.clone()).unwrap_or_else(|| format!("Surah {n}"));
-        (chapter_route(n, None), name)
+        let name = find_chapter(list, n).map_or(n.to_string(), |c| c.name_simple.clone());
+        (chapter_route(n, None), format!("Surah {name}"))
     };
     let prev = (id > 1).then(|| surah(id - 1));
     let next = (id < CHAPTER_COUNT).then(|| surah(id + 1));

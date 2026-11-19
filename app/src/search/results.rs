@@ -3,8 +3,9 @@
 use dioxus::prelude::*;
 use quran_api::{Search, SearchResult};
 
-use super::{Highlighted, describe_error, nav, use_chapters, verse_route};
+use super::{Highlighted, describe_error, nav, use_chapter_list, verse_route};
 use crate::Route;
+use crate::settings::LANGUAGE;
 use crate::layout::{ErrorBox, Loading};
 
 const PER_PAGE: u32 = 20;
@@ -33,8 +34,7 @@ pub fn SearchPage(q: crate::route::SearchQuery) -> Element {
 #[component]
 fn SearchResults(q: String) -> Element {
     let client = crate::use_api();
-    let settings = crate::settings::use_settings();
-    let chapters = use_chapters();
+    let chapter_list = use_chapter_list();
     let mut page = use_signal(|| 1u32);
 
     let query = q.trim().to_string();
@@ -50,21 +50,15 @@ fn SearchResults(q: String) -> Element {
             let client = client.clone();
             let query = query_sig();
             let page = page();
-            let locale = settings.read().locale.clone();
             async move {
                 if query.is_empty() {
                     return Ok(None);
                 }
-                client
-                    .search(&query, PER_PAGE, page, &locale)
-                    .await
-                    .map(Some)
-                    .map_err(|e| describe_error(&e))
+                client.search(&query, PER_PAGE, page, LANGUAGE).await.map(Some).map_err(|e| describe_error(&e))
             }
         }
     });
 
-    let chapter_list = chapters.read().clone().unwrap_or_default();
     let shortcuts = nav::parse(&query, &chapter_list);
     let pending = results.pending();
     let title = if query.is_empty() {
@@ -164,10 +158,8 @@ fn ResultItem(result: SearchResult) -> Element {
     let arabic = result.highlighted.clone().unwrap_or_else(|| result.text.clone());
     rsx! {
         li { class: "search-result",
-            div { class: "search-result-head",
-                Link { class: "search-badge", to: route, "{result.verse_key}" }
-            }
-            div { class: "search-arabic", lang: "ar", dir: "rtl",
+            Link { class: "search-badge", to: route, "{result.verse_key}" }
+            p { class: "search-arabic", lang: "ar", dir: "rtl",
                 Highlighted { html: arabic }
             }
             for (i, t) in result.translations.iter().cloned().enumerate() {

@@ -4,6 +4,9 @@
 //! automatically when the bottom sentinel scrolls into view), and resets
 //! whenever the verse-related settings change. Loaded verses are drawn as
 //! 15-line mushaf pages by `mushaf_view::MushafView`.
+//!
+//! A feed opened at a reading position keeps loading until that verse has
+//! arrived, then scrolls to it.
 
 use dioxus::prelude::*;
 use quran_api::{Client, Verse, VerseQuery, VersesResponse};
@@ -12,9 +15,11 @@ use super::integrity::{self, IntegrityIssue};
 use super::mushaf_layout::Trim;
 use super::mushaf_view::MushafView;
 use super::parse::{PER_PAGE, VerseSpan, api_page_of, api_pages_for, next_page_within};
-use super::use_chapters;
+use super::{position, reference};
 use crate::layout::{ErrorBox, Loading};
+use crate::route::Anchor;
 use crate::settings::use_settings;
+use crate::util::short_list;
 
 /// What to load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +172,47 @@ fn use_verse_feed(source: Memo<VerseSource>) -> VerseFeed {
     feed
 }
 
+/// Open the feed at `start`: load until its verse is there, then scroll to it.
+/// Otherwise every change of the verses is reported, and the position is
+/// forgotten when the list goes away.
+fn use_start_position(feed: VerseFeed, start: Anchor) {
+    let mut pending = use_signal(|| None);
+    // On mount, and when only the hash of the URL changes (a link, or one typed in):
+    // unless the reader is already there, which is all a re-render with the
+    // tracked position in the URL amounts to.
+    use_effect(use_reactive!(|start| {
+        if let Some(target) = start.0.filter(|t| (*position::POSITION.peek()).map(|p| p.at) != Some(*t)) {
+            position::hold();
+            pending.set(Some(target));
+        }
+    }));
+    use_effect(move || {
+        let loaded = feed.verses.read().len();
+        let Some(target) = pending() else {
+            if loaded > 0 {
+                position::changed();
+            }
+            return;
+        };
+        if (feed.loading)() || *feed.loaded_for.read() != Some(*feed.source.peek()) {
+            return;
+        }
+        let key = target.verse_key();
+        if feed.verses.read().iter().any(|v| v.verse_key == key) {
+            pending.set(None);
+            spawn(async move {
+                position::restore(target).await;
+            });
+        } else if (feed.next_page)().is_some() && (feed.error)().is_none() {
+            feed.load_more();
+        } else {
+            pending.set(None);
+            position::release();
+        }
+    });
+    use_drop(|| *position::POSITION.write() = None);
+}
+
 /// Mushaf pages of a verse source with "Load more", auto-load near the bottom,
 /// surah headers where a surah starts, and integrity warning banners.
 ///
@@ -181,10 +227,12 @@ pub(crate) fn VerseList(
     #[props(default)] expected: Vec<(u16, VerseSpan)>,
     /// Whether the first/last mushaf line may be cut (verse-range views).
     #[props(default)] trim: Trim,
+    /// Reading position to open at.
+    #[props(default)] start: Anchor,
 ) -> Element {
     let source = use_memo(use_reactive!(|source| source));
     let feed = use_verse_feed(source);
-    let chapters = use_chapters();
+    use_start_position(feed, start);
     let expected = use_memo(use_reactive!(|expected| expected));
 
     // Integrity of what is loaded so far (completeness only once fully loaded).
@@ -198,13 +246,8 @@ pub(crate) fn VerseList(
         let complete = (feed.next_page)().is_none() && !(feed.loading)() && (feed.error)().is_none();
         let expected_spans = expected.read();
         let expected: &[(u16, VerseSpan)] = if complete { &expected_spans } else { &[] };
-        let counts: Vec<(u16, u16)> = match &*chapters.read() {
-            Some(Ok(list)) => list.iter().map(|c| (c.id, c.verses_count)).collect(),
-            _ => Vec::new(),
-        };
-        let verses_count = |c: u16| counts.iter().find(|(id, _)| *id == c).map(|(_, n)| *n);
         let mut issues = feed.merge_issues.read().clone();
-        issues.extend(integrity::check_all(&feed.verses.read(), script_field, expected, verses_count));
+        issues.extend(integrity::check_all(&feed.verses.read(), script_field, expected, reference::verses_in));
         issues
     });
     use_effect(move || {
@@ -240,8 +283,10 @@ pub(crate) fn VerseList(
     let glyph_keys =
         integrity::keys_where(&issues_now, |i| matches!(i, IntegrityIssue::GlyphPageMismatch { .. }));
     let missing_keys = integrity::keys_where(&issues_now, |i| matches!(i, IntegrityIssue::MissingVerse { .. }));
+    let unknown_keys = integrity::keys_where(&issues_now, |i| matches!(i, IntegrityIssue::UnknownVerse { .. }));
     drop(issues_now);
-    let any_issue = [&fallback_keys, &empty_word_keys, &layout_keys, &shape_keys, &glyph_keys, &missing_keys]
+    let any_issue =
+        [&fallback_keys, &empty_word_keys, &layout_keys, &shape_keys, &glyph_keys, &missing_keys, &unknown_keys]
         .iter()
         .any(|k| !k.is_empty());
 
@@ -256,7 +301,7 @@ pub(crate) fn VerseList(
             div { class: "integrity-banner", role: "status",
                 if !fallback_keys.is_empty() {
                     p {
-                        "Some verse data looked incomplete; showing full verse text instead for: "
+                        "Some verse data looked incomplete (words missing or out of place); showing full verse text instead for: "
                         {key_list(&fallback_keys)}
                     }
                 }
@@ -282,6 +327,12 @@ pub(crate) fn VerseList(
                     p {
                         "Some words are shown as Unicode text because their glyph font page did not match: "
                         {key_list(&glyph_keys)}
+                    }
+                }
+                if !unknown_keys.is_empty() {
+                    p {
+                        "The server returned verse numbers that do not exist: "
+                        {key_list(&unknown_keys)}
                     }
                 }
                 if !missing_keys.is_empty() {
@@ -341,12 +392,7 @@ pub(crate) fn VerseList(
 
 /// "2:5, 2:7, … (+N more)" for the banner.
 fn key_list(keys: &[String]) -> String {
-    const SHOWN: usize = 12;
-    let mut s = keys.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
-    if keys.len() > SHOWN {
-        s.push_str(&format!(" (+{} more)", keys.len() - SHOWN));
-    }
-    s
+    short_list(keys, 12)
 }
 
 #[cfg(test)]
@@ -359,13 +405,6 @@ mod tests {
             "id": 1, "verse_number": n, "verse_key": key
         }))
         .unwrap()
-    }
-
-    #[test]
-    fn key_list_truncates() {
-        let keys: Vec<String> = (1..=14).map(|n| format!("2:{n}")).collect();
-        assert_eq!(key_list(&keys[..2]), "2:1, 2:2");
-        assert!(key_list(&keys).ends_with("2:12 (+2 more)"));
     }
 
     #[test]

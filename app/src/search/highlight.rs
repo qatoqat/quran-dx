@@ -6,6 +6,8 @@
 //! Unknown tags are dropped (their text kept); `<sup>`, `<script>` and `<style>`
 //! are dropped along with their content. Basic entities are decoded.
 
+use crate::settings::html::{decode_entities, is_html_tag};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
     pub text: String,
@@ -24,17 +26,6 @@ struct Tag {
 }
 
 /// Parse the inside of `<...>` (without the angle brackets).
-fn is_html_tag(name: &str) -> bool {
-    matches!(
-        name,
-        "a" | "abbr" | "b" | "bdi" | "bdo" | "big" | "blockquote" | "br" | "cite" | "code" | "dd" | "del"
-            | "dfn" | "div" | "dl" | "dt" | "em" | "font" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-            | "hr" | "i" | "img" | "ins" | "kbd" | "li" | "mark" | "ol" | "p" | "pre" | "q" | "s"
-            | "samp" | "script" | "small" | "span" | "strike" | "strong" | "style" | "sub" | "sup"
-            | "table" | "tbody" | "td" | "th" | "thead" | "tr" | "tt" | "u" | "ul" | "var" | "wbr"
-    )
-}
-
 fn parse_tag(inner: &str) -> Option<Tag> {
     let inner = inner.trim();
     let (closing, rest) = match inner.strip_prefix('/') {
@@ -67,48 +58,6 @@ fn tag_end(s: &str, start: usize) -> Option<usize> {
         }
     }
     None
-}
-
-/// Decode `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`/`&#39;`, `&nbsp;`, and numeric entities.
-pub fn decode_entities(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(pos) = rest.find('&') {
-        out.push_str(&rest[..pos]);
-        rest = &rest[pos..];
-        let decoded = rest.find(';').filter(|&end| end <= 10).and_then(|end| {
-            let name = &rest[1..end];
-            let c = match name {
-                "amp" => Some('&'),
-                "lt" => Some('<'),
-                "gt" => Some('>'),
-                "quot" => Some('"'),
-                "apos" => Some('\''),
-                "nbsp" => Some('\u{a0}'),
-                _ => {
-                    let num = name.strip_prefix('#')?;
-                    let code = match num.strip_prefix(['x', 'X']) {
-                        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
-                        None => num.parse().ok()?,
-                    };
-                    char::from_u32(code).filter(|c| *c != '\0')
-                }
-            }?;
-            Some((c, end))
-        });
-        match decoded {
-            Some((c, end)) => {
-                out.push(c);
-                rest = &rest[end + 1..];
-            }
-            None => {
-                out.push('&');
-                rest = &rest[1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 fn push(segments: &mut Vec<Segment>, raw: &str, highlighted: bool) {

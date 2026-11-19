@@ -1,5 +1,7 @@
 //! Header search box: an ARIA combobox with navigation shortcuts and
-//! debounced verse suggestions.
+//! debounced verse suggestions. The header mounts it when the search button is
+//! pressed; it asks to be closed (`onclose`) after a jump, on Escape, and when
+//! it loses the focus while empty.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -8,8 +10,9 @@ use dioxus::prelude::*;
 use quran_api::SearchResult;
 
 use super::nav::{self, NavSuggestion};
-use super::{Highlighted, describe_error, use_chapters, verse_route};
+use super::{Highlighted, describe_error, use_chapter_list, verse_route};
 use crate::Route;
+use crate::settings::LANGUAGE;
 
 const DEBOUNCE_MS: u32 = 300;
 /// Delay before closing on blur, so clicks on options land first.
@@ -67,10 +70,9 @@ fn wants_verse_search(q: &str) -> bool {
 }
 
 #[component]
-pub fn SearchBox() -> Element {
+pub fn SearchBox(onclose: EventHandler) -> Element {
     let client = crate::use_api();
-    let settings = crate::settings::use_settings();
-    let chapters = use_chapters();
+    let chapter_list = use_chapter_list();
     let navigator = use_navigator();
 
     let mut query = use_signal(String::new);
@@ -95,7 +97,6 @@ pub fn SearchBox() -> Element {
     }));
 
     let q = query();
-    let chapter_list = chapters.read().clone().unwrap_or_default();
     let mut items: Vec<Item> = nav::parse(&q, &chapter_list).into_iter().map(Item::Nav).collect();
     if let VerseState::Ready(results) = &*verses.read() {
         items.extend(results.iter().cloned().map(Item::Verse));
@@ -112,6 +113,7 @@ pub fn SearchBox() -> Element {
         open.set(false);
         active.set(None);
         navigator.push(route);
+        onclose.call(());
     };
 
     let oninput = {
@@ -129,14 +131,13 @@ pub fn SearchBox() -> Element {
             }
             let client = client.clone();
             let generation = generation.clone();
-            let locale = settings.read().locale.clone();
             spawn(async move {
                 crate::util::sleep_ms(DEBOUNCE_MS).await;
                 if generation.get() != my {
                     return;
                 }
                 verses.set(VerseState::Loading);
-                let res = client.search(value.trim(), SUGGESTION_COUNT, 1, &locale).await;
+                let res = client.search(value.trim(), SUGGESTION_COUNT, 1, LANGUAGE).await;
                 if generation.get() != my {
                     return; // a newer query superseded this one
                 }
@@ -171,11 +172,12 @@ pub fn SearchBox() -> Element {
                     None => {}
                 }
             }
-            Key::Escape if open() => {
+            Key::Escape if expanded => {
                 evt.prevent_default();
                 open.set(false);
                 active.set(None);
             }
+            Key::Escape => onclose.call(()),
             _ => {}
         }
     };
@@ -198,6 +200,9 @@ pub fn SearchBox() -> Element {
                 if focus_gen.get() == my {
                     open.set(false);
                     active.set(None);
+                    if query.peek().trim().is_empty() {
+                        onclose.call(());
+                    }
                 }
             });
         }
@@ -221,6 +226,9 @@ pub fn SearchBox() -> Element {
                 aria_expanded: if expanded { "true" } else { "false" },
                 aria_activedescendant: active_idx.map(option_id),
                 value: "{q}",
+                onmounted: move |e| async move {
+                    let _ = e.set_focus(true).await;
+                },
                 oninput,
                 onkeydown,
             }

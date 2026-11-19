@@ -5,6 +5,8 @@
 //! - (a) [`sort_dedup`]: verses sorted by (chapter, verse) and deduplicated by key.
 //! - (b) [`check_gaps`] / [`check_expected`]: verse numbers contiguous.
 //! - (c) + (d) [`word_issues`]: per-verse word structure and per-word text.
+//! - (f) [`reference_issues`]: each verse exists and has the number of words the
+//!   compiled-in [`reference`] tables say it has.
 //! - (e) [`layout_issues`]: 15-line mushaf layout data (`page_number`/`line_number`
 //!   on every word, lines 1..=15, at most 15 lines per page, lines in order, glyph
 //!   font page = layout page).
@@ -14,6 +16,7 @@ use std::fmt;
 use quran_api::{Verse, Word};
 
 use super::parse::VerseSpan;
+use super::reference;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntegrityIssue {
@@ -35,6 +38,10 @@ pub enum IntegrityIssue {
     EndMarkerNotLast { verse_key: String, position: u16 },
     /// A word has no text for the selected script nor any fallback.
     EmptyWordText { verse_key: String, position: u16 },
+    /// The verse has `found` words but is known to have `expected`.
+    WordCount { verse_key: String, expected: usize, found: usize },
+    /// A verse number beyond the end of its surah.
+    UnknownVerse { verse_key: String },
     /// A word has no `page_number`/`line_number`: the verse is shown as flowing text.
     MissingLayout { verse_key: String, position: u16 },
     /// A word's `line_number` is outside 1..=15: the verse is shown as flowing text.
@@ -58,6 +65,8 @@ impl IntegrityIssue {
             | IntegrityIssue::MissingEndMarker { verse_key }
             | IntegrityIssue::ExtraEndMarker { verse_key, .. }
             | IntegrityIssue::EndMarkerNotLast { verse_key, .. }
+            | IntegrityIssue::WordCount { verse_key, .. }
+            | IntegrityIssue::UnknownVerse { verse_key }
             | IntegrityIssue::EmptyWordText { verse_key, .. }
             | IntegrityIssue::MissingLayout { verse_key, .. }
             | IntegrityIssue::LineOutOfRange { verse_key, .. }
@@ -76,6 +85,7 @@ impl IntegrityIssue {
                 | IntegrityIssue::MissingEndMarker { .. }
                 | IntegrityIssue::ExtraEndMarker { .. }
                 | IntegrityIssue::EndMarkerNotLast { .. }
+                | IntegrityIssue::WordCount { .. }
                 | IntegrityIssue::EmptyWordText { .. }
         )
     }
@@ -119,6 +129,10 @@ impl fmt::Display for IntegrityIssue {
             IntegrityIssue::EmptyWordText { verse_key, position } => {
                 write!(f, "{verse_key}: word {position} has no text")
             }
+            IntegrityIssue::WordCount { verse_key, expected, found } => {
+                write!(f, "{verse_key}: {found} words instead of {expected}")
+            }
+            IntegrityIssue::UnknownVerse { verse_key } => write!(f, "{verse_key}: no such verse"),
             IntegrityIssue::MissingLayout { verse_key, position } => {
                 write!(f, "{verse_key}: word {position} has no mushaf page/line")
             }
@@ -253,6 +267,33 @@ pub fn word_issues(verse: &Verse, script_field: &str) -> Vec<IntegrityIssue> {
     issues
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Unit tests build verses with made-up word counts, so there the reference
+    /// check runs only for the tests that turn it on.
+    pub(crate) static CHECK_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// (f) A verse against the compiled-in reference: it must exist, and have the
+/// number of words it is known to have. This catches a response that lost (or
+/// gained) a word although its word positions are contiguous.
+pub fn reference_issues(verse: &Verse) -> Vec<IntegrityIssue> {
+    #[cfg(test)]
+    if !CHECK_REFERENCE.get() {
+        return Vec::new();
+    }
+    let Some(chapter) = verse.chapter_number() else { return Vec::new() };
+    let found = word_count(verse);
+    match reference::words_in(chapter, verse.verse_number) {
+        None => vec![IntegrityIssue::UnknownVerse { verse_key: verse.verse_key.clone() }],
+        // A verse without any words is reported as such by `word_issues`.
+        Some(expected) if expected != found && !verse.words.is_empty() => {
+            vec![IntegrityIssue::WordCount { verse_key: verse.verse_key.clone(), expected, found }]
+        }
+        Some(_) => Vec::new(),
+    }
+}
+
 /// Number of non-end-marker words.
 pub fn word_count(verse: &Verse) -> usize {
     verse.words.iter().filter(|w| !w.is_end_marker()).count()
@@ -294,10 +335,11 @@ pub fn check_boundaries(verses: &[Verse], verses_count: impl Fn(u16) -> Option<u
 pub const MUSHAF_LINES: u16 = 15;
 
 /// Whether a verse's words are structurally complete (words present, positions
-/// 1..n in order, exactly one trailing `end` marker). Otherwise the verse is
-/// rendered from its verse-level text.
+/// 1..n in order, exactly one trailing `end` marker, as many words as the verse
+/// has). Otherwise the verse is rendered from its verse-level text.
 pub fn words_structurally_ok(verse: &Verse) -> bool {
     !word_issues(verse, "text_uthmani").iter().any(IntegrityIssue::is_structural_word_issue)
+        && !reference_issues(verse).iter().any(IntegrityIssue::is_structural_word_issue)
 }
 
 /// `(page, line)` of a word, if both are present and the line is 1..=15.
@@ -397,6 +439,7 @@ pub fn check_all(
     }
     for v in verses {
         issues.extend(word_issues(v, script_field));
+        issues.extend(reference_issues(v));
     }
     issues.extend(layout_issues(verses));
     issues
@@ -701,5 +744,37 @@ mod tests {
         assert_eq!(word_text(&w, U), Some("q"));
         assert!(!IntegrityIssue::EmptyWordText { verse_key: "1:1".into(), position: 1 }.is_structural_word_issue());
         assert!(IntegrityIssue::NoWords { verse_key: "1:1".into() }.is_structural_word_issue());
+    }
+
+    #[test]
+    fn word_counts_are_checked_against_the_reference() {
+        CHECK_REFERENCE.set(true);
+        // 1:1 has four words and its marker.
+        let whole = verse_n("1:1", 4);
+        assert_eq!(reference_issues(&whole), []);
+        assert!(words_structurally_ok(&whole));
+        // The same verse without its last word still has contiguous positions…
+        let short = verse_n("1:1", 3);
+        assert_eq!(word_issues(&short, "text_uthmani"), []);
+        // …but is known to be one word short, and is then shown from its verse text.
+        let issue = IntegrityIssue::WordCount { verse_key: "1:1".into(), expected: 4, found: 3 };
+        assert_eq!(reference_issues(&short), std::slice::from_ref(&issue));
+        assert!(issue.is_structural_word_issue() && !words_structurally_ok(&short));
+        assert_eq!(issue.to_string(), "1:1: 3 words instead of 4");
+        assert_eq!(reference_issues(&verse_n("1:1", 5)).len(), 1, "an extra word is reported too");
+        // A verse past the end of its surah does not exist.
+        assert_eq!(reference_issues(&verse_n("1:8", 4)), [IntegrityIssue::UnknownVerse { verse_key: "1:8".into() }]);
+        assert!(check_all(&[short], "text_uthmani", &[], |_| None).contains(&issue));
+        CHECK_REFERENCE.set(false);
+    }
+
+    /// A verse with `n` words (positions 1..=n) and its end marker.
+    fn verse_n(key: &str, n: u16) -> Verse {
+        let number: u16 = key.split(':').nth(1).unwrap().parse().unwrap();
+        let mut words: Vec<serde_json::Value> = (1..=n)
+            .map(|p| serde_json::json!({ "id": p, "position": p, "char_type_name": "word", "text_uthmani": "x", "page_number": 1, "line_number": 2 }))
+            .collect();
+        words.push(serde_json::json!({ "id": 99, "position": n + 1, "char_type_name": "end", "text_uthmani": "١", "page_number": 1, "line_number": 2 }));
+        serde_json::from_value(serde_json::json!({ "id": 1, "verse_number": number, "verse_key": key, "words": words })).unwrap()
     }
 }

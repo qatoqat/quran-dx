@@ -1,69 +1,11 @@
-/* Settings page, word-by-word display, translations and footnotes.
-   Uses the theme variables from main.css; --arabic-size, --translation-size and
-   --arabic-font are overridden at runtime by settings::FontLoader. */
-
-/* ---------- Arabic words ---------- */
-.word {
-  display: inline-block;
-  font-family: var(--arabic-font);
-  font-size: var(--arabic-size);
-  line-height: 2;
-  padding: 0 .08em;
-  border-radius: 6px;
-  color: inherit;
-}
-.word-missing { color: var(--muted); font-family: system-ui, sans-serif; font-size: 1rem; }
-.word.has-tooltip { position: relative; cursor: help; outline: none; }
-.word.has-tooltip:hover,
-.word.has-tooltip:focus { background: color-mix(in srgb, var(--accent) 14%, transparent); }
-.word.has-tooltip:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
-
-.word-tooltip {
-  position: absolute; bottom: calc(100% - .2em); left: 50%; transform: translateX(-50%);
-  z-index: 20; display: flex; flex-direction: column; align-items: center; gap: .1rem;
-  min-width: max-content; max-width: 16rem; padding: .35rem .6rem;
-  background: var(--fg); color: var(--bg); border-radius: 6px;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  font-size: .85rem; line-height: 1.35; text-align: center; white-space: normal;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, .18);
-  visibility: hidden; opacity: 0; pointer-events: none;
-  transition: opacity .12s ease, visibility .12s;
-}
-.word-tooltip::after {
-  content: ""; position: absolute; top: 100%; left: 50%; margin-left: -5px;
-  border: 5px solid transparent; border-top-color: var(--fg);
-}
-.word.has-tooltip:hover .word-tooltip,
-.word.has-tooltip:focus .word-tooltip { visibility: visible; opacity: 1; }
-
-.word-inline {
-  display: inline-flex; flex-direction: column; align-items: center;
-  vertical-align: top; margin: 0 .15em .4em; line-height: 1.2;
-}
-.word-inline .word-text { line-height: 1.9; }
-.word-inline .wbw-translation,
-.word-inline .wbw-transliteration {
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  font-size: .78rem; line-height: 1.3; max-width: 9rem; text-align: center;
-}
-.word-inline .wbw-translation { color: var(--fg); }
-.wbw-transliteration { font-style: italic; }
-.word-inline .wbw-transliteration { color: var(--muted); }
-.word-tooltip .wbw-transliteration { opacity: .8; }
-
-.ayah-marker {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 1.6em; height: 1.6em; margin: 0 .2em; padding: 0 .25em;
-  font-family: var(--arabic-font); font-size: calc(var(--arabic-size) * .6);
-  line-height: 1; vertical-align: middle;
-  color: var(--accent); border: 1.5px solid currentColor; border-radius: 999px;
-}
+/* Settings panel, translations and footnotes. Uses the theme variables from
+   main.css; --arabic-size, --translation-size and the mushaf spacing variables
+   are set at runtime by settings::FontLoader. */
 
 /* ---------- Translations & footnotes ---------- */
-.translation { margin: .6rem 0 1rem; }
-.translation-text { margin: 0; font-size: var(--translation-size); line-height: 1.7; }
-.translation[dir="rtl"] .translation-text { line-height: 2.1; }
-.translation-source { margin: .2rem 0 0; font-size: .78rem; color: var(--muted); }
+.translation-text { margin: .5rem 0 .2rem; font-size: var(--translation-size); line-height: 1.7; }
+.translation-text[dir="rtl"] { line-height: 2.1; }
+.translation-source { margin: 0 0 .6rem; font-size: .78rem; color: var(--muted); }
 
 .footnote-ref { line-height: 0; }
 .footnote-btn {
@@ -79,52 +21,72 @@
   background: var(--card); border: 1px solid var(--border); border-inline-start: 3px solid var(--accent);
   font-size: calc(var(--translation-size) * .9);
 }
-.footnote-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: .3rem; }
-.footnote-title { font-size: .75rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
 .footnote-close {
-  font-size: 1.2rem; line-height: 1; padding: .1rem .4rem; cursor: pointer;
-  background: none; border: none; color: var(--muted); border-radius: 4px;
+  float: inline-end; margin-inline-start: .5rem; font-size: 1.2rem; line-height: 1; padding: .1rem .4rem;
+  cursor: pointer; background: none; border: none; color: var(--muted); border-radius: 4px;
 }
 .footnote-close:hover { color: var(--fg); background: var(--border); }
 .footnote-box .loading { padding: .5rem; text-align: start; }
 
-/* ---------- Settings page ---------- */
-.settings-page { display: grid; gap: 1.2rem; max-width: 46rem; margin: 0 auto; }
-.settings-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
-.settings-header h1 { margin: 0; }
-.settings-note { margin: -.6rem 0 0; color: var(--muted); font-size: .9rem; }
-.settings-help { color: var(--muted); font-size: .85rem; line-height: 1.45; margin: .2rem 0 .6rem; }
-.settings-error { color: #c0392b; font-size: .85rem; margin: .2rem 0 0; }
-@media (prefers-color-scheme: dark) { .settings-error { color: #ff8a80; } }
-
-.settings-card {
-  margin: 0; padding: 1rem 1.2rem 1.2rem; min-width: 0;
-  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+/* ---------- Settings panel ---------- */
+/* A sidebar floating over the right edge; the page keeps its place underneath. */
+.settings-panel {
+  position: fixed; inset-block: 0; inset-inline-end: 0; z-index: 40;
+  width: min(22rem, 100vw); padding: 0 1.1rem 2rem;
+  overflow-y: auto; overscroll-behavior: contain;
+  background: var(--card); border-inline-start: 1px solid var(--border); box-shadow: -6px 0 24px rgb(0 0 0 / .18);
 }
-.settings-card legend { padding: 0 .4rem; font-weight: 600; }
+.settings-panel > header {
+  position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: .4rem;
+  margin: 0 -1.1rem; padding: .6rem 1.1rem; background: var(--card); border-bottom: 1px solid var(--border);
+}
+.settings-panel h2 { margin: 0 auto 0 0; font-size: 1.15rem; }
+.settings-help { color: var(--muted); font-size: .85rem; line-height: 1.45; margin: .2rem 0 .6rem; }
+.settings-panel > .settings-help { margin: .7rem 0 0; }
+.settings-error { color: var(--danger); font-size: .85rem; margin: .2rem 0 0; }
+
+.settings-panel fieldset { margin: 1.1rem 0 0; padding: 0; border: none; min-width: 0; }
+.settings-panel legend { padding: 0; margin-bottom: .4rem; font-weight: 600; }
 
 /* Controls */
-.settings-page button {
+.settings-panel button {
   font: inherit; cursor: pointer; color: var(--fg);
   background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: .4rem .9rem;
 }
-.settings-page button:hover:not(:disabled) { border-color: var(--accent); }
-.settings-page button:disabled { cursor: default; opacity: .5; }
-.settings-page button:focus-visible,
-.settings-page input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.settings-page .settings-reset { color: var(--accent); }
-.settings-page .link-button { border: none; background: none; color: var(--accent); padding: .2rem .4rem; }
+.settings-panel button:hover:not(:disabled) { border-color: var(--accent); }
+.settings-panel button:disabled { cursor: default; opacity: .5; }
+.settings-panel button:focus-visible,
+.settings-panel input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.settings-panel .link-button { border: none; background: none; color: var(--accent); padding: .2rem .4rem; }
+.settings-panel .settings-close {
+  border: none; background: none; color: var(--muted); padding: 0 .45rem; font-size: 1.4rem; line-height: 1.3;
+}
+.settings-panel .settings-close:hover { color: var(--fg); background: var(--border); }
 
-.settings-page input[type="search"],
-.settings-page input[type="text"] {
+.settings-panel input[type="search"],
+.settings-panel input[type="text"] {
   font: inherit; color: var(--fg); background: var(--bg);
   border: 1px solid var(--border); border-radius: 8px; padding: .45rem .6rem; min-width: 0;
 }
-.settings-page input[type="text"].invalid { border-color: #c0392b; }
-.settings-page input[type="checkbox"],
-.settings-page input[type="radio"],
-.settings-page input[type="range"] { accent-color: var(--accent); }
-.settings-page input:disabled + span { opacity: .55; }
+.settings-panel input[type="text"].invalid { border-color: var(--danger); }
+.settings-panel input[type="checkbox"],
+.settings-panel input[type="radio"],
+.settings-panel input[type="range"] { accent-color: var(--accent); }
+.settings-panel input:disabled + span { opacity: .55; }
+
+/* A row of exclusive choices (theme, pointer shape). */
+.segmented { display: inline-flex; flex-wrap: wrap; padding: 3px; background: var(--bg); border: 1px solid var(--border); border-radius: 1.1rem; }
+.segmented label { cursor: pointer; }
+.segmented input { position: absolute; opacity: 0; pointer-events: none; }
+.segmented span { display: block; padding: .15rem .8rem; border-radius: 999px; color: var(--muted); font-size: .9rem; font-weight: 600; }
+.segmented input:checked + span { background: var(--accent); color: var(--on-accent); }
+.segmented input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.settings-inline { display: flex; flex-wrap: wrap; align-items: center; gap: .1rem .7rem; margin: .5rem 0; }
+.settings-inline > span { flex-basis: 100%; }
+.settings-panel input[type="color"] {
+  width: 2.4rem; height: 1.8rem; padding: 0; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); cursor: pointer;
+}
 
 .settings-check { display: flex; align-items: center; gap: .55rem; padding: .25rem 0; cursor: pointer; }
 .settings-check input { flex: none; margin: 0; }
@@ -135,7 +97,7 @@
 }
 
 /* Mushaf font choice */
-.choice-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: .8rem; }
+.choice-cards { display: grid; gap: .6rem; }
 .choice-card {
   display: grid; grid-template-columns: auto 1fr; align-items: center; gap: .25rem .6rem;
   padding: .75rem .9rem; border: 1px solid var(--border); border-radius: 10px; cursor: pointer;
@@ -148,54 +110,14 @@
 .choice-desc { grid-column: 2; color: var(--muted); font-size: .85rem; line-height: 1.4; }
 
 /* Text size */
-.settings-row {
-  display: grid; grid-template-columns: 9rem 1fr 2rem; align-items: center; gap: .8rem; margin: .5rem 0;
-}
+.settings-row { display: grid; grid-template-columns: 1fr 2rem; align-items: center; gap: .1rem .8rem; margin: .5rem 0; }
+.settings-row > span { grid-column: 1 / -1; }
 .settings-row input[type="range"] { width: 100%; margin: 0; }
 .range-value { text-align: end; font-variant-numeric: tabular-nums; color: var(--muted); }
 
-.font-preview {
-  margin-top: .8rem; padding: .8rem 1rem; border-radius: 10px;
-  background: var(--bg); border: 1px dashed var(--border); overflow-x: auto;
-}
-.preview-arabic {
-  margin: 0; display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start;
-  gap: .2rem .6rem; font-family: var(--arabic-font); font-size: var(--arabic-size);
-}
-.preview-word { display: inline-flex; flex-direction: column; align-items: center; }
-.preview-word[title] { cursor: help; border-radius: 6px; }
-.preview-word[title]:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
-.preview-word-ar { line-height: 1.9; }
-.preview-word-en,
-.preview-word-tr {
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  font-size: .78rem; line-height: 1.3; max-width: 9rem; text-align: center;
-}
-.preview-word-en { color: var(--fg); }
-.preview-word-tr { color: var(--muted); font-style: italic; }
-.font-preview .translation { margin: .6rem 0 0; }
-.preview-note { margin: .6rem 0 0; font-size: .78rem; }
-
 /* Translations */
 .translation-picker { margin-top: .6rem; padding-top: .6rem; border-top: 1px dashed var(--border); }
-.translation-picker.is-off .translation-list { opacity: .7; }
-.translations-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .8rem; margin-bottom: .5rem; }
-.translations-toolbar .settings-radios-label { margin: 0; flex: 1 1 auto; }
-.translations-toolbar .settings-help { margin: 0; }
-.translations-filter { width: 100%; box-sizing: border-box; margin-bottom: .5rem; }
-
-.selected-chips { list-style: none; display: flex; flex-wrap: wrap; gap: .4rem; padding: 0; margin: 0 0 .6rem; }
-.chip {
-  display: inline-flex; align-items: center; gap: .3rem; padding: .15rem .3rem .15rem .7rem;
-  font-size: .85rem; border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 14%, transparent); border: 1px solid var(--accent);
-}
-.settings-page .chip button { border: none; background: none; padding: 0 .35rem; line-height: 1.3; border-radius: 999px; }
-
-.translation-list {
-  max-height: 24rem; overflow-y: auto; padding-inline-end: .3rem;
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); gap: .1rem 1.2rem; align-items: start;
-}
+.translation-picker.is-off .translation-list { max-height: 20rem; overflow-y: auto; padding-inline-end: .3rem; }
 .translation-option { flex-wrap: wrap; align-items: flex-start; }
 .translation-option input { margin-top: .25rem; }
 .translation-name { flex: 1; }
@@ -208,13 +130,6 @@
 .settings-field-row input { flex: 1 1 auto; }
 .settings-field-row button { flex: none; }
 
-@media (max-width: 640px) {
-  .settings-card { padding: .8rem .9rem 1rem; }
-  .settings-row { grid-template-columns: 1fr 2rem; gap: .3rem .8rem; }
-  .settings-row > span { grid-column: 1 / -1; }
-  .translation-list { max-height: 20rem; grid-template-columns: 1fr; }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .word-tooltip, .choice-card { transition: none; }
+  .choice-card { transition: none; }
 }

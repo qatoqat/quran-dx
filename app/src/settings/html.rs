@@ -37,7 +37,7 @@ impl Tag {
 
 /// HTML element names we treat as markup. Anything else in angle brackets
 /// (e.g. `<ye>`, `<<Allah>>`) is ordinary translation text.
-fn is_html_tag(name: &str) -> bool {
+pub fn is_html_tag(name: &str) -> bool {
     matches!(
         name,
         "a" | "abbr" | "b" | "bdi" | "bdo" | "big" | "blockquote" | "br" | "cite" | "code" | "dd" | "del"
@@ -167,19 +167,6 @@ pub fn strip_tags(input: &str) -> String {
         }
     }
     decode_entities(&out)
-}
-
-/// Concatenate the text of `input` (footnote markers and styling dropped).
-#[allow(dead_code)]
-pub fn plain_text(input: &str) -> String {
-    tokenize(input)
-        .into_iter()
-        .map(|s| match s {
-            Segment::Text { text, .. } => text,
-            Segment::LineBreak => "\n".into(),
-            Segment::FootNote { .. } => String::new(),
-        })
-        .collect()
 }
 
 fn emit_text(
@@ -373,6 +360,18 @@ fn decode_entity(name: &str) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The text of `input` (footnote markers and styling dropped).
+    fn plain_text(input: &str) -> String {
+        tokenize(input)
+            .into_iter()
+            .map(|s| match s {
+                Segment::Text { text, .. } => text,
+                Segment::LineBreak => "\n".into(),
+                Segment::FootNote { .. } => String::new(),
+            })
+            .collect()
+    }
 
     fn t(text: &str) -> Segment {
         Segment::Text { text: text.into(), style: TextStyle::default() }

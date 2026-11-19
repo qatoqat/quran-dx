@@ -20,34 +20,10 @@ mod search_box;
 pub use results::SearchPage;
 pub use search_box::SearchBox;
 
-/// Chapter list shared by the search box and the results page, keyed by locale,
-/// so it is fetched once per locale rather than once per component.
-static CHAPTERS: GlobalSignal<Option<(String, Rc<Vec<Chapter>>)>> = Signal::global(|| None);
-
-/// Chapter list for name matching and labels. Resolves to an empty list on
-/// error: numeric shortcuts still work without it.
-fn use_chapters() -> Resource<Rc<Vec<Chapter>>> {
-    let client = crate::use_api();
-    let settings = crate::settings::use_settings();
-    use_resource(move || {
-        let client = client.clone();
-        let locale = settings.read().locale.clone();
-        async move {
-            if let Some((cached_locale, list)) = CHAPTERS.peek().as_ref()
-                && *cached_locale == locale
-            {
-                return list.clone();
-            }
-            match client.chapters(&locale).await {
-                Ok(list) => {
-                    let list = Rc::new(list);
-                    *CHAPTERS.write() = Some((locale, list.clone()));
-                    list
-                }
-                Err(_) => Rc::new(Vec::new()),
-            }
-        }
-    })
+/// Chapter list for name matching and labels; empty until loaded or on error
+/// (numeric shortcuts still work without it).
+fn use_chapter_list() -> Rc<Vec<Chapter>> {
+    crate::reader::use_chapters().read().as_ref().and_then(|r| r.clone().ok()).unwrap_or_default()
 }
 
 /// Route for a single verse key like `"2:255"`. Unparseable keys fall back to the
@@ -57,9 +33,9 @@ pub fn verse_route(verse_key: &str) -> Route {
         Some((c, v))
             if c.parse::<u16>().is_ok_and(|n| n > 0) && v.parse::<u16>().is_ok_and(|n| n > 0) =>
         {
-            Route::ChapterRange { chapter: c.to_string(), range: v.to_string() }
+            Route::verses(c, v)
         }
-        _ => Route::ChapterPage { chapter: verse_key.to_string() },
+        _ => Route::surah(verse_key),
     }
 }
 
@@ -95,9 +71,9 @@ fn Highlighted(html: String) -> Element {
     rsx! {
         for seg in segments {
             if seg.highlighted {
-                mark { class: "search-hit", "{seg.text}" }
+                mark { "{seg.text}" }
             } else {
-                span { "{seg.text}" }
+                "{seg.text}"
             }
         }
     }
@@ -111,10 +87,10 @@ mod tests {
     fn verse_routes() {
         assert_eq!(
             verse_route("2:255"),
-            Route::ChapterRange { chapter: "2".into(), range: "255".into() }
+            Route::verses("2", "255")
         );
-        assert_eq!(verse_route("2:x"), Route::ChapterPage { chapter: "2:x".into() });
-        assert_eq!(verse_route("0:1"), Route::ChapterPage { chapter: "0:1".into() });
+        assert_eq!(verse_route("2:x"), Route::surah("2:x"));
+        assert_eq!(verse_route("0:1"), Route::surah("0:1"));
     }
 
     #[test]

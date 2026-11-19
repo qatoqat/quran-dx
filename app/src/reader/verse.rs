@@ -1,8 +1,9 @@
 //! Per-verse actions (copy verse text + translations) and plain-text helpers.
-//! (The old verse-card rendering was replaced by the mushaf view in `mushaf_view`.)
 
 use dioxus::prelude::*;
 use quran_api::Verse;
+
+use crate::util::js_string;
 
 /// "Copy" button for a verse. Uses the browser/webview clipboard via
 /// `document::eval`, which works on web and desktop alike.
@@ -49,11 +50,6 @@ if (navigator.clipboard && window.isSecureContext) {
   fallback();
 }
 "#;
-
-/// Encode `s` as a JavaScript string literal (JSON is a subset of JS).
-fn js_string(s: &str) -> String {
-    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
-}
 
 /// Plain-text form of a verse for the clipboard.
 pub(crate) fn copy_text(verse: &Verse) -> String {
@@ -164,10 +160,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(copy_text(&verse), "a b\n\n(1:1)");
-    }
-
-    #[test]
-    fn js_string_escapes() {
-        assert_eq!(js_string("a\"b\n</script>"), r#""a\"b\n</script>""#);
     }
 }

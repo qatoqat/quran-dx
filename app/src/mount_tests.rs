@@ -45,7 +45,7 @@ fn Harness(props: HarnessProps) -> Element {
     use_hook(|| {
         let list: quran_api::ChaptersResponse =
             serde_json::from_str(include_str!("../../crates/quran-api/tests/fixtures/chapters.json")).unwrap();
-        *crate::reader::CHAPTERS.write() = Some(("en".into(), list.chapters));
+        *crate::reader::CHAPTERS.write() = Some(Rc::new(list.chapters));
     });
     crate::settings::provide_settings();
     let path = props.path.clone();
@@ -101,7 +101,10 @@ fn mushaf_page_mounts_verse_list() {
     // VerseList renders immediately here (no chapter lookup needed): it must show
     // its loading state, not panic and not claim "No verses found".
     let html = render("/page/1");
-    assert!(html.contains("mushaf-view"), "{html}");
+    assert!(html.contains("Page 1"), "{html}");
+    // Page 1 has a next page but no previous one.
+    assert!(html.contains("← Next: Page 2") && !html.contains("Previous:"), "{html}");
+    assert!(render("/page/3").contains("Previous: Page 2 →"), "no previous link on page 3");
     assert!(html.contains("loading"), "verse list did not render:\n{html}");
     assert!(!html.contains("No verses found"), "{html}");
     assert!(!html.contains("integrity-banner"), "{html}");
@@ -110,7 +113,7 @@ fn mushaf_page_mounts_verse_list() {
 #[test]
 fn juz_mounts_verse_list() {
     let html = render("/juz/30");
-    assert!(html.contains("juz-view"), "{html}");
+    assert!(html.contains("Juz 30"), "{html}");
     assert!(html.contains("loading"), "verse list did not render:\n{html}");
     assert!(!html.contains("integrity-banner"), "{html}");
 }
@@ -130,9 +133,69 @@ fn invalid_routes_show_errors() {
 }
 
 #[test]
-fn search_and_settings_mount() {
+fn header_has_mode_toggle_and_closed_search() {
+    let html = render("/");
+    for needle in ["aria-label=\"Search\"", "class=\"mode-toggle\"", "aria-label=\"Settings\"", "surah-filter"] {
+        assert!(html.contains(needle), "expected {needle:?} in:\n{html}");
+    }
+    // The search input and the settings panel are mounted only while open.
+    assert!(!html.contains("search-input") && !html.contains("id=\"settings-panel\""), "{html}");
+    // On the surah list with nothing read yet: Surah and Page start reading, Juz shows its list.
+    for href in ["href=\"/1\"", "href=\"/juz\"", "href=\"/page/1\""] {
+        assert!(html.contains(href), "expected {href:?} in:\n{html}");
+    }
+}
+
+#[test]
+fn header_names_the_view() {
+    for (path, title) in [("/page/22", "Page 22"), ("/juz/2#2:142", "Juz 2"), ("/2", "Surah 2"), ("/2/255", "Surah 2")] {
+        let html = render(path);
+        assert!(html.contains(&format!("<h1 class=\"view-title\">{title}</h1>")), "{path}: no title {title:?}");
+    }
+    for path in ["/", "/juz", "/page/999", "/search?q=x"] {
+        assert!(!render(path).contains("view-title"), "{path} should have no title");
+    }
+}
+
+#[test]
+fn list_routes_mount() {
+    let juz = render("/juz");
+    // On its list, the current mode's button leads to reading (here: nothing read yet).
+    assert!(juz.contains("href=\"/juz/1\" class=\"active\""), "the toggle does not mark Juz");
+    assert!(juz.contains("data-tip=\"Open Juz 1\"") && juz.contains("data-tip=\"Show the surah list\""), "no tooltips");
+    // Pages have no list.
+    assert!(!juz.contains("href=\"/page\""), "a link to a page list remains");
+}
+
+#[test]
+fn reader_urls_with_a_position_mount() {
+    for path in ["/2#2:142", "/juz/2#2:142", "/page/22#2:142:3", "/2/140-150#2:142", "/2#nonsense"] {
+        let html = render(path);
+        assert!(html.contains("loading"), "{path}:\n{html}");
+    }
+}
+
+#[test]
+fn search_mounts() {
     assert_renders("/search?q=light%20%26%20dark", "site-header");
-    assert_renders("/settings", "Settings");
+}
+
+#[test]
+fn settings_panel_is_mounted_only_while_open() {
+    #[allow(non_snake_case)]
+    fn Panel() -> Element {
+        use_context_provider(|| quran_api::Client::new(UNREACHABLE.to_string()));
+        crate::settings::provide_settings();
+        rsx! { crate::settings::SettingsPanel { onclose: |_| {} } }
+    }
+    let mut dom = VirtualDom::new(Panel);
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom);
+    for needle in ["id=\"settings-panel\"", "Mushaf font", "Word by word", "Text size", "Content width", "Font source URL"] {
+        assert!(html.contains(needle), "expected {needle:?} in:\n{html}");
+    }
+    let closed = render("/page/1");
+    assert!(closed.contains("aria-controls=\"settings-panel\"") && !closed.contains("id=\"settings-panel\""), "{closed}");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -142,7 +205,6 @@ async fn chapter_view_mounts_verse_list_and_reports_errors() {
     // or a false "missing verses" banner.
     for path in ["/1", "/1/2-5"] {
         let html = render_settled(path).await;
-        assert!(html.contains("chapter-view"), "{path}:\n{html}");
         assert!(html.contains("Could not load verses"), "{path}: no error shown:\n{html}");
         assert!(html.contains("Try again"), "{path}:\n{html}");
         assert!(!html.contains("integrity-banner"), "{path}:\n{html}");
@@ -160,10 +222,11 @@ async fn out_of_range_verse_redirects_or_errors() {
 // Mushaf rendering against a local fake API.
 
 /// A word JSON value on `(page, line)`; `end` makes it the ayah-end marker.
+/// As from the real API, words have no QPC text of their own (the verse has it).
 fn word_json(pos: u16, page: u16, line: u16, end: bool, meaning: &str) -> serde_json::Value {
     serde_json::json!({
         "id": pos, "position": pos, "char_type_name": if end { "end" } else { "word" },
-        "qpc_uthmani_hafs": format!("ق{pos}"), "text_uthmani": format!("ع{pos}"),
+        "qpc_uthmani_hafs": null, "text_uthmani": format!("ع{pos}"),
         "code_v2": format!("\u{fb50}{pos}"), "v2_page": page, "page_number": page, "line_number": line,
         "location": "", "translation": { "text": meaning }
     })
@@ -174,9 +237,11 @@ fn verse_json(c: u16, v: u16, n: u16, page: u16, line: u16) -> serde_json::Value
     let mut words: Vec<serde_json::Value> =
         (1..=n).map(|p| word_json(p, page, line, false, &format!("m{c}-{v}-{p}"))).collect();
     words.push(word_json(n + 1, page, line, true, &format!("({v})")));
+    let qpc: Vec<String> = (1..=n).map(|p| format!("ق{p}")).collect();
     serde_json::json!({
         "id": v, "verse_number": v, "verse_key": format!("{c}:{v}"), "page_number": page,
         "text_uthmani": "نص", "words": words,
+        "qpc_uthmani_hafs": format!("{}\u{a0}{}", qpc.join(" "), crate::reader::glyph::arabic_number(v)),
         "translations": [{ "resource_id": 131, "text": format!("Meaning of {c}:{v}<sup foot_note=1>1</sup>") }]
     })
 }
@@ -261,34 +326,39 @@ async fn mushaf_page_renders_lines_words_headers_and_bismillah() {
     let html = render_settled_with("/page/604", &api, 60).await;
     assert!(html.contains("class=\"mushaf-page\""), "{html}");
     assert!(html.contains("data-page=\"604\""), "{html}");
-    // Surah header (name from the seeded chapter list) and Bismillah before 114:1.
-    assert!(html.contains("surah-header-line"), "{html}");
-    assert!(html.contains("Surah An-Nas"), "{html}");
-    assert!(html.contains("bismillah-line"), "{html}");
+    // Surah banner (name, place and verse count from the seeded chapter list) and
+    // Bismillah before 114:1.
+    assert!(html.contains("class=\"surah-banner"), "{html}");
+    assert!(html.contains("Surah An-Nas · Meccan · 6 verses"), "{html}");
+    assert!(html.contains("مكية") && html.contains("آياتها ٦"), "{html}");
+    assert!(html.contains("class=\"bismillah "), "{html}");
     assert!(html.contains("In the Name of Allah—the Most Compassionate, Most Merciful."), "{html}");
-    let header = html.find("surah-header-line").unwrap();
+    let header = html.find("class=\"surah-banner").unwrap();
     let first_line = html.find("class=\"mushaf-line align").unwrap();
-    assert!(header < first_line, "header must come before the first line");
+    assert!(header < first_line, "banner must come before the first line");
     // Three lines, 7 words, 3 ayah markers, 3 verse anchors with word counts.
     assert_eq!(count(&html, "class=\"mushaf-line align-justify\""), 3, "{html}");
     for line in ["11", "12", "13"] {
         assert!(html.contains(&format!("data-line=\"{line}\"")), "{html}");
     }
     assert_eq!(count(&html, "data-location=\"114:"), 10, "{html}");
-    assert_eq!(count(&html, "class=\"ayah-marker\""), 3, "{html}");
+    assert_eq!(count(&html, "class=\"ayah-marker qpc\""), 3, "{html}");
     assert!(html.contains("data-word-count=\"3\""), "{html}");
-    assert_eq!(count(&html, "class=\"verse-anchor\""), 3, "{html}");
+    assert_eq!(count(&html, "data-word-count="), 3, "one anchor per verse:\n{html}");
     assert!(html.contains("id=\"verse-114:1\""), "{html}");
-    // Fonts can't load here (no JS): every word falls back to its Unicode text.
+    // Fonts can't load here (no JS): every word falls back to its QPC Unicode text,
+    // taken from the verse's text, and every ayah marker to its number.
     assert!(!html.contains("data-mode=\"glyph\""), "{html}");
-    assert!(html.contains("ق1"), "{html}");
-    assert!(html.contains("\u{fd3f}١\u{fd3e}"), "{html}");
-    assert!(html.contains("font-banner"), "{html}");
-    assert!(!html.contains("word-missing"), "{html}");
+    assert!(html.contains("class=\"word qpc\"") && html.contains(">ق1<"), "{html}");
+    assert!(html.contains(">١<"), "{html}");
+    assert!(!html.contains("class=\"word missing"), "{html}");
     // Word-by-word meanings (tooltip or inline, per the default settings).
     assert!(html.contains("m114-1-1"), "{html}");
-    assert!(!html.contains("integrity-banner"), "{html}");
-    assert!(html.contains(">604<"), "page number footer:\n{html}");
+    // The fake API serves only 114:1-3 for page 604; the page is known to begin at
+    // 112:1 and end at 114:6, so the verses that did not arrive are reported.
+    assert!(html.contains("Some verses were missing from the server response: 112:1, 112:2"), "{html}");
+    assert!(html.contains("114:4, 114:5, 114:6") && !html.contains("looked incomplete"), "{html}");
+    assert!(html.contains(">604</a>"), "page number link:\n{html}");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -308,9 +378,9 @@ async fn mushaf_missing_line_data_shows_flowing_block_and_banner() {
 async fn verse_range_trims_partial_lines() {
     let api = fake_api();
     let html = render_settled_with("/114/2-3", &api, 60).await;
-    assert!(html.contains("chapter-view"), "{html}");
-    assert!(!html.contains("surah-header-line"), "no header for a range not starting at 1:\n{html}");
-    assert_eq!(count(&html, "class=\"verse-anchor\""), 2, "{html}");
+    assert!(html.contains("An-Nas · Verses 2–3 of 6"), "{html}");
+    assert!(!html.contains("surah-banner"), "no banner for a range not starting at 1:\n{html}");
+    assert_eq!(count(&html, "data-word-count="), 2, "{html}");
     assert!(html.contains("align-end"), "first line of a range is packed, not justified:\n{html}");
     assert!(html.contains("align-start"), "{html}");
 }
@@ -319,8 +389,8 @@ async fn verse_range_trims_partial_lines() {
 async fn surah_slugs_redirect_to_numeric_urls() {
     let api = fake_api();
     let html = render_settled_with("/an-nas", &api, 60).await;
-    assert!(html.contains("chapter-view"), "{html}");
-    assert!(html.contains("114. An-Nas"), "{html}");
+    assert!(html.contains(r#"data-location="114:1:1""#), "{html}");
+    assert!(html.contains("Surah An-Nas"), "{html}");
     let html = render_settled_with("/an-nas/2-3", &api, 60).await;
     assert!(html.contains("Verses 2–3"), "{html}");
     let html = render_settled_with("/no-such-surah", &api, 20).await;
@@ -376,4 +446,29 @@ async fn client_side_navigation_between_juz() {
     assert!(html.contains(r#"data-location="114:1:1""#), "juz 30 not shown:\n{html}");
     assert!(!html.contains(r#"data-location="67:1:1""#), "juz 29 still shown:\n{html}");
     assert!(!html.contains("missing from the server response"), "false missing-verse warning:\n{html}");
+}
+
+/// Surah banner: a plain framed text line until the QUL banner fonts are verified;
+/// then the ornamental frame with the name fitted in its cartouche and the place
+/// and verse count in its roundels.
+#[tokio::test(flavor = "current_thread")]
+async fn surah_banner_text_then_glyph() {
+    use crate::reader::fonts::{BANNER, BannerFonts, BannerMetrics, Ink};
+    let api = fake_api();
+    let mut dom = VirtualDom::new_with_props(Harness, HarnessProps { path: "/page/604".into(), api });
+    dom.rebuild_in_place();
+    settle(&mut dom).await;
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains(r#"data-banner="text""#), "{html}");
+    assert!(html.contains("سورة"), "banner text missing:\n{html}");
+    assert!(!html.contains("surah114 surah-icon"), "ligature codes must never show without the fonts:\n{html}");
+
+    let metrics = BannerMetrics { frame: Ink(0.0, 8047.0, 813.0, 188.0), names: vec![Ink(0.0, 2546.0, 688.0, 78.0); 114] };
+    dom.in_runtime(|| *BANNER.write() = Some(BannerFonts::Ready(Rc::new(metrics))));
+    settle(&mut dom).await;
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains(r#"data-banner="glyph""#), "{html}");
+    assert!(html.contains(r#"viewBox="0 0 8047.0 1001.0""#), "{html}");
+    assert!(html.contains(">surah114 surah-icon<") && html.contains(">header<"), "{html}");
+    assert!(html.contains(">مكية<") && html.contains(">٦<"), "roundel labels:\n{html}");
 }

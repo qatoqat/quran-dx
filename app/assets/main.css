@@ -1,25 +1,117 @@
 /* Base layout & theme (shared). Feature styles live in reader.css / settings.css / search.css. */
 :root {
-  --bg: #fdfcf9; --fg: #1f2328; --muted: #6a737d; --accent: #2ca4ab; --border: #e5e2da;
-  --card: #ffffff; --arabic-size: 2rem; --translation-size: 1.05rem;
-  --arabic-font: "KFGQPC Uthmanic Script HAFS", "Amiri Quran", "Scheherazade New", serif;
-}
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #16181d; --fg: #e6e6e6; --muted: #9aa0a6; --border: #2d3139; --card: #1d2026; }
+  /* Every colour is a light / dark pair; the theme setting picks a side through
+     `color-scheme` (settings::Theme), and sepia overrides the light ones. */
+  color-scheme: light dark;
+  --bg: light-dark(#fdfcf9, #16181d); --fg: light-dark(#1f2328, #e6e6e6); --muted: light-dark(#6a737d, #9aa0a6);
+  --border: light-dark(#e5e2da, #2d3139); --card: light-dark(#ffffff, #1d2026);
+  --accent: #2ca4ab; --on-accent: #fff;
+  --danger: light-dark(#c0392b, #ff8a80); --ornament: light-dark(#b8860b, #d4b25c);
+  /* Tooltips are dark in every theme. */
+  --tip-bg: light-dark(#1f2328, #2a2e37); --tip-fg: #f2f2f2; --tip-border: light-dark(transparent, #414653);
+  --arabic-size: 2.4rem; --translation-size: 1.05rem;
+  --ui-font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Arabic outside the mushaf page fonts: names and labels; Quran text; and
+     QPC-encoded Quran text (the reader loads the UthmanicHafs face for it). */
+  --arabic-font: "Noto Naskh Arabic", "Amiri Quran", serif;
+  --quran-font: "Amiri Quran", "Noto Naskh Arabic", serif;
+  --qpc-font: "UthmanicHafs", "Amiri Quran", serif;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg);
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; line-height: 1.6; }
+/* Scrollbars: a thin rounded thumb and no track. The window always keeps room
+   for its scrollbar, so nothing moves when the page becomes long or short. */
+html { overflow-y: scroll; background: var(--bg); }
+html::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 40%, transparent) content-box;
+  border: 3px solid transparent; border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
+@supports not selector(::-webkit-scrollbar) {
+  * { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--muted) 40%, transparent) transparent; }
+}
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--ui-font); line-height: 1.6; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
-.site-header { position: sticky; top: 0; z-index: 10; display: flex; gap: 1rem; align-items: center;
-  padding: .6rem 1.2rem; background: var(--card); border-bottom: 1px solid var(--border); }
-.brand { font-weight: 700; color: var(--fg); white-space: nowrap; }
-.header-search { flex: 1; max-width: 520px; position: relative; }
-.header-nav { display: flex; gap: 1rem; margin-left: auto; }
-.site-main { max-width: 960px; margin: 0 auto; padding: 1.5rem 1.2rem 4rem; }
-.site-footer { text-align: center; color: var(--muted); font-size: .85rem; padding: 2rem 1rem; }
+/* The bar spans the window; what is in it keeps to the width of the page content.
+   Brand and tools take equal shares, so the title or search box sits in the middle. */
+.site-header { position: sticky; top: 0; z-index: 30; display: flex; gap: .6rem; align-items: center;
+  padding: .5rem max(1.2rem, calc((100% - var(--content-width, 960px)) / 2 + 1.2rem));
+  background: var(--card); border-bottom: 1px solid var(--border); }
+.brand { flex: 1 1 0; min-width: 0; font-weight: 700; color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.view-title { flex: 0 1 auto; min-width: 0; margin: 0; font-size: 1.05rem; line-height: inherit;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.header-tools { flex: 1 1 0; display: flex; gap: .6rem; align-items: center; justify-content: flex-end; }
+.icon-button { flex: none; display: grid; place-items: center; width: 2.2rem; height: 2.2rem; padding: 0;
+  color: var(--muted); background: none; border: none; border-radius: 999px; cursor: pointer; }
+.icon-button:hover, .icon-button[aria-expanded="true"] {
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.icon-button:focus-visible, .mode-toggle a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.icon { width: 1.25rem; height: 1.25rem; fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round; }
+.mode-toggle { flex: none; display: flex; padding: 3px; background: var(--bg); border: 1px solid var(--border); border-radius: 999px; }
+.mode-toggle a { padding: .15rem .8rem; border-radius: 999px; color: var(--muted); font-size: .9rem; font-weight: 600; }
+.mode-toggle a:hover { color: var(--fg); text-decoration: none; }
+.mode-toggle a.active { background: var(--accent); color: var(--on-accent); }
+/* Each button's tooltip (where it leads), centred under the toggle. */
+.mode-toggle { position: relative; }
+.mode-toggle a::after {
+  content: attr(data-tip); position: absolute; top: calc(100% + .55rem); left: 50%; transform: translateX(-50%);
+  padding: .25rem .6rem; border-radius: 6px; white-space: nowrap; pointer-events: none;
+  font-size: .8rem; font-weight: 500; color: var(--tip-fg); background: var(--tip-bg);
+  border: 1px solid var(--tip-border);
+  box-shadow: 0 4px 14px rgb(0 0 0 / .18); visibility: hidden; opacity: 0; transition: opacity .12s ease;
+}
+.mode-toggle a:focus-visible::after { visibility: visible; opacity: 1; }
+@media (hover: hover) { .mode-toggle a:hover::after { visibility: visible; opacity: 1; } }
+/* The width of the content column is a setting (--content-width). */
+.site-main { max-width: var(--content-width, 960px); margin: 0 auto; padding: 1.5rem 1.2rem 4rem; }
+.site-footer { margin: 0; text-align: center; color: var(--muted); font-size: .85rem; padding: 2rem 1rem; }
 .loading { padding: 2rem; text-align: center; color: var(--muted); }
-.error-box { padding: 1rem; border: 1px solid #e0a3a3; background: #fff1f1; color: #8a1f1f; border-radius: 8px; }
+.error-box {
+  padding: 1rem; border-radius: 8px; border: 1px solid light-dark(#e0a3a3, #7f2a2a);
+  background: light-dark(#fff1f1, #2b1616); color: light-dark(#8a1f1f, #f3b1b1);
+}
 .not-found { text-align: center; padding: 3rem 1rem; }
-@media (max-width: 640px) { .header-nav { display: none; } }
+/* Narrow windows: the title takes the brand's place. */
+@media (max-width: 560px) {
+  .site-header, .header-tools { gap: .3rem; }
+  .site-header { padding-inline: .7rem; }
+  .brand:not(:has(+ .header-tools)) { display: none; }
+  .view-title { flex: 1 1 0; }
+  .mode-toggle a { padding: .15rem .55rem; font-size: .85rem; }
+}
+
+/* ---------- Reading pointer (settings::pointer) ---------- */
+/* Below the header the mouse cursor is hidden and a dot or ring is drawn in its
+   place; the header and the settings panel keep the cursor. Its diameter is a
+   share of a mushaf line's height. */
+html.pointer-on body, html.pointer-on :is(.site-main, .site-footer) * { cursor: none; }
+html.pointer-on :is(.site-header, .settings-panel) { cursor: auto; }
+.reading-pointer {
+  --d: calc(var(--mushaf-size) * var(--fit) * var(--mushaf-line) * var(--pointer-size, .5));
+  position: fixed; left: 0; top: 0; z-index: 25; pointer-events: none;
+}
+.reading-pointer span { opacity: var(--pointer-opacity, .5); }
+.reading-pointer :is(i, b) {
+  position: absolute; left: 0; top: 0; width: var(--d); height: var(--d); margin: calc(var(--d) / -2);
+  border-radius: 50%; will-change: transform;
+}
+.reading-pointer i { background: var(--pointer-color, #fff); filter: blur(calc(var(--d) * var(--pointer-blur, 0))); }
+/* Glow: a lens that intensifies the colours of the text under the pointer (the
+   text itself stays sharp). The blur setting softens its edge like the dot's:
+   the lens grows and fades out towards its rim. */
+.reading-pointer b {
+  --lens: calc(var(--d) * (1 + 2 * var(--pointer-blur, 0)));
+  --boost: saturate(calc(1 + var(--pointer-glow, 0) * .4)) brightness(calc(1 + var(--pointer-glow, 0) * .04));
+  --edge: radial-gradient(closest-side, #000 calc(100% - var(--pointer-blur, 0) * 300%), transparent);
+  width: var(--lens); height: var(--lens); margin: calc(var(--lens) / -2);
+  -webkit-backdrop-filter: var(--boost); backdrop-filter: var(--boost);
+  -webkit-mask-image: var(--edge); mask-image: var(--edge);
+}
+.reading-pointer.ring i { background: none; border: calc(var(--d) * .12) solid var(--pointer-color, #fff); }
+/* A hairline keeps a light pointer visible on a light page. */
+.reading-pointer i:first-child { box-shadow: 0 0 0 1px light-dark(rgb(0 0 0 / .2), transparent); }

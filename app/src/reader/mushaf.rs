@@ -4,85 +4,73 @@ use dioxus::prelude::*;
 
 use super::feed::{VerseList, VerseSource};
 use super::parse::{JUZ_COUNT, MUSHAF_PAGES, valid_juz, valid_mushaf_page};
-use super::{PrevNext, use_scroll_to_top};
+use super::{PrevNext, reference, use_juzs, use_scroll_to_top};
 use crate::Route;
 use crate::layout::ErrorBox;
+use crate::route::Anchor;
 
 #[component]
-pub fn MushafPage(page: u16) -> Element {
+pub fn MushafPage(page: u16, at: Anchor) -> Element {
     if !valid_mushaf_page(page) {
         return rsx! {
             section { class: "reader-error",
                 ErrorBox { message: "Page {page} does not exist; the mushaf has pages 1 to {MUSHAF_PAGES}." }
-                p { Link { to: Route::MushafPage { page: 1 }, "Go to page 1" } }
+                p { Link { to: Route::page(1), "Go to page 1" } }
             }
         };
     }
-    rsx! { PageView { key: "page-{page}", page } }
+    rsx! { PageView { key: "page-{page}", page, at } }
 }
 
 #[component]
-fn PageView(page: u16) -> Element {
+fn PageView(page: u16, at: Anchor) -> Element {
     use_scroll_to_top(page);
-    let prev = (page > 1).then(|| (Route::MushafPage { page: page - 1 }, format!("Page {}", page - 1)));
+    let prev = (page > 1).then(|| (Route::page(page - 1), format!("Page {}", page - 1)));
     let next =
-        (page < MUSHAF_PAGES).then(|| (Route::MushafPage { page: page + 1 }, format!("Page {}", page + 1)));
+        (page < MUSHAF_PAGES).then(|| (Route::page(page + 1), format!("Page {}", page + 1)));
     rsx! {
-        section { class: "mushaf-view",
-            header { class: "view-heading",
-                h1 { "Page {page}" }
-                p { class: "view-subtitle", "of {MUSHAF_PAGES} in the Madani mushaf" }
-            }
-            PrevNext { prev: prev.clone(), next: next.clone() }
-            VerseList { source: VerseSource::Page(page) }
-            PrevNext { prev, next }
-        }
+        document::Title { "Page {page} – The Noble Quran" }
+        PrevNext { prev: prev.clone(), next: next.clone() }
+        // Every verse that begins on the page must arrive, including its first and last.
+        VerseList { source: VerseSource::Page(page), expected: reference::verses_on_page(page), start: at }
+        PrevNext { prev, next }
     }
 }
 
 #[component]
-pub fn JuzPage(juz: u8) -> Element {
+pub fn JuzPage(juz: u8, at: Anchor) -> Element {
     if !valid_juz(juz) {
         return rsx! {
             section { class: "reader-error",
                 ErrorBox { message: "Juz {juz} does not exist; there are {JUZ_COUNT} ajzāʾ." }
-                p { Link { to: Route::JuzPage { juz: 1 }, "Go to juz 1" } }
+                p { Link { to: Route::juz(1), "Go to juz 1" } }
             }
         };
     }
-    rsx! { JuzView { key: "juz-{juz}", juz } }
+    rsx! { JuzView { key: "juz-{juz}", juz, at } }
 }
 
 #[component]
-fn JuzView(juz: u8) -> Element {
+fn JuzView(juz: u8, at: Anchor) -> Element {
     use_scroll_to_top(juz);
     // The juz's verse ranges per surah, so a missing verse at either end of the juz
     // (where the page-to-page checks can't see it) is still reported.
-    let client = crate::use_api();
-    let juzs = use_resource(move || {
-        let client = client.clone();
-        async move { client.juzs().await.ok() }
-    });
+    let juzs = use_juzs();
     // `juz` via use_reactive: the view is reused when navigating juz → juz.
     let expected = use_memo(use_reactive!(|juz| match &*juzs.read() {
-        Some(Some(list)) => list
+        Some(Ok(list)) => list
             .iter()
             .find(|j| j.juz_number == juz)
             .map(|j| super::parse::juz_mapping(&j.verse_mapping))
             .unwrap_or_default(),
         _ => Vec::new(),
     }));
-    let prev = (juz > 1).then(|| (Route::JuzPage { juz: juz - 1 }, format!("Juz {}", juz - 1)));
-    let next = (juz < JUZ_COUNT).then(|| (Route::JuzPage { juz: juz + 1 }, format!("Juz {}", juz + 1)));
+    let prev = (juz > 1).then(|| (Route::juz(juz - 1), format!("Juz {}", juz - 1)));
+    let next = (juz < JUZ_COUNT).then(|| (Route::juz(juz + 1), format!("Juz {}", juz + 1)));
     rsx! {
-        section { class: "juz-view",
-            header { class: "view-heading",
-                h1 { "Juz {juz}" }
-                p { class: "view-subtitle", "of {JUZ_COUNT}" }
-            }
-            PrevNext { prev: prev.clone(), next: next.clone() }
-            VerseList { source: VerseSource::Juz(juz), expected: expected() }
-            PrevNext { prev, next }
-        }
+        document::Title { "Juz {juz} – The Noble Quran" }
+        PrevNext { prev: prev.clone(), next: next.clone() }
+        VerseList { source: VerseSource::Juz(juz), expected: expected(), start: at }
+        PrevNext { prev, next }
     }
 }

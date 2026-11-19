@@ -24,6 +24,12 @@ quran-api = { path = "crates/quran-api" }
 inherits = "dev"
 opt-level = 1
 
+# Web release builds: like `release`, but not stripped by cargo. wasm-bindgen
+# needs the sections `strip` removes, and dx strips the result itself afterwards.
+[profile.wasm-release]
+inherits = "release"
+strip = false
+
 [profile.server-dev]
 inherits = "dev"
 

@@ -1,18 +1,18 @@
-//! The settings page: mushaf font, word by word, English translations, text
-//! size and the font source. The app is English-only, so there is no language
-//! or script picker.
+//! The settings panel, a sidebar over the right edge of the window: theme,
+//! mushaf font, word by word, English translations, text size, the reading
+//! pointer and the font source.
+//! It floats over the page, is mounted only while open, and the page behind it
+//! is the live preview.
 
 use dioxus::prelude::*;
-use quran_api::{Translation, TranslationResource};
+use quran_api::TranslationResource;
 
 use super::storage::sanitize_font_base_url;
-use super::wbw::TranslationText;
-use super::{MushafFont, Settings, WbwDisplay, use_settings};
+use super::{MushafFont, PointerShape, Settings, Theme, WbwDisplay, sanitize_color, use_settings};
 use crate::layout::Loading;
 
 /// `(id, name)` of English translations, used when `/resources/translations` fails.
 pub const FALLBACK_TRANSLATIONS: &[(u32, &str)] = &[
-    (131, "The Clear Quran (Dr. Mustafa Khattab)"),
     (20, "Saheeh International"),
     (85, "Abdul Haleem"),
     (84, "Mufti Taqi Usmani"),
@@ -76,48 +76,200 @@ pub fn selected_label(id: u32, known: &[TranslationResource]) -> String {
     known.iter().find(|t| t.id == id).map(|t| display_name(t).to_string()).unwrap_or_else(|| format!("Translation #{id}"))
 }
 
-/// Bismillah in QPC Hafs text (what the `UthmanicHafs` face expects), with
-/// English word meanings and transliterations.
-const PREVIEW_WORDS: &[(&str, &str, &str)] = &[
-    ("بِسۡمِ", "In (the) name", "bis'mi"),
-    ("ٱللَّهِ", "(of) Allah", "l-lahi"),
-    ("ٱلرَّحۡمَٰنِ", "the Most Gracious", "l-raḥmāni"),
-    ("ٱلرَّحِيمِ", "the Most Merciful", "l-raḥīmi"),
-];
-const PREVIEW_TRANSLATION: &str = "In the Name of Allah—the Most Compassionate, Most Merciful.";
-
-fn preview_translation() -> Translation {
-    Translation {
-        id: None,
-        resource_id: 0,
-        text: PREVIEW_TRANSLATION.into(),
-        resource_name: Some("Preview".into()),
-        language_name: Some("english".into()),
-    }
-}
-
 #[component]
-pub fn SettingsPage() -> Element {
+pub fn SettingsPanel(onclose: EventHandler) -> Element {
     let mut settings = use_settings();
 
     rsx! {
-        document::Title { "Settings – The Noble Quran" }
-        section { class: "settings-page",
-            div { class: "settings-header",
-                h1 { "Settings" }
+        aside {
+            id: "settings-panel",
+            class: "settings-panel",
+            role: "dialog",
+            aria_label: "Settings",
+            onkeydown: move |e| if e.key() == Key::Escape { onclose.call(()) },
+            header {
+                h2 { "Settings" }
                 button {
                     r#type: "button",
-                    class: "settings-reset",
+                    class: "link-button",
                     onclick: move |_| settings.set(Settings::default()),
                     "Reset to defaults"
                 }
+                button {
+                    r#type: "button",
+                    class: "settings-close",
+                    aria_label: "Close settings",
+                    onmounted: move |e| async move {
+                        let _ = e.set_focus(true).await;
+                    },
+                    onclick: move |_| onclose.call(()),
+                    "×"
+                }
             }
-            p { class: "settings-note", "Changes apply immediately and are saved on this device." }
+            p { class: "settings-help", "Changes apply immediately and are saved on this device." }
+            ThemeSection {}
             MushafFontSection {}
             WordByWordSection {}
             TranslationsSection {}
             FontSizeSection {}
+            PointerSection {}
             AdvancedSection {}
+        }
+    }
+}
+
+#[component]
+fn ThemeSection() -> Element {
+    let mut settings = use_settings();
+    let (current, custom) = {
+        let s = settings.read();
+        (s.theme, s.custom_theme.clone())
+    };
+    rsx! {
+        fieldset {
+            legend { "Theme" }
+            div { class: "segmented", role: "radiogroup", aria_label: "Theme",
+                for theme in Theme::ALL {
+                    label { key: "{theme.label()}",
+                        input {
+                            r#type: "radio",
+                            name: "theme",
+                            checked: theme == current,
+                            onchange: move |_| settings.write().theme = theme,
+                        }
+                        span { "{theme.label()}" }
+                    }
+                }
+            }
+            if current == Theme::Custom {
+                div { class: "settings-inline",
+                    label { class: "settings-check",
+                        input {
+                            r#type: "color",
+                            value: "{custom.background}",
+                            oninput: move |e| if let Some(c) = sanitize_color(&e.value()) { settings.write().custom_theme.background = c },
+                        }
+                        span { "Background" }
+                    }
+                    label { class: "settings-check",
+                        input {
+                            r#type: "color",
+                            value: "{custom.accent}",
+                            oninput: move |e| if let Some(c) = sanitize_color(&e.value()) { settings.write().custom_theme.accent = c },
+                        }
+                        span { "Accent" }
+                    }
+                }
+                p { class: "settings-help",
+                    "Text, cards, borders and tooltips are shades worked out from these two colours; a dark background gets light text and the dark tajweed colours."
+                }
+            }
+        }
+    }
+}
+
+/// One slider of the pointer section.
+#[component]
+fn PointerRange(id: String, label: String, min: u8, max: u8, step: u8, value: u8, unit: String, onset: EventHandler<u8>) -> Element {
+    rsx! {
+        label { class: "settings-row", r#for: "{id}",
+            span { "{label}" }
+            input {
+                id: "{id}",
+                r#type: "range",
+                min: "{min}",
+                max: "{max}",
+                step: "{step}",
+                value: "{value}",
+                oninput: move |e| if let Ok(v) = e.value().parse::<u8>() { onset.call(v.clamp(min, max)) },
+            }
+            output { class: "range-value", "{value}{unit}" }
+        }
+    }
+}
+
+#[component]
+fn PointerSection() -> Element {
+    let mut settings = use_settings();
+    let pointer = settings.read().pointer.clone();
+    let shapes = [(PointerShape::Circle, "Circle"), (PointerShape::Ring, "Ring")];
+    rsx! {
+        fieldset {
+            legend { "Pointer" }
+            label { class: "settings-check",
+                input {
+                    r#type: "checkbox",
+                    checked: pointer.enabled,
+                    onchange: move |e| settings.write().pointer.enabled = e.checked(),
+                }
+                span { "Show a reading pointer" }
+            }
+            p { class: "settings-help",
+                "A dot or ring in place of the mouse cursor below the top bar. The cursor comes back over the top bar and these settings."
+            }
+            if pointer.enabled {
+                // The colour swatch comes first: the browser opens its picker to the
+                // right of it, and at the panel's right edge that would not fit the window.
+                div { class: "settings-inline",
+                    span { "Colour and shape" }
+                    input {
+                        r#type: "color",
+                        aria_label: "Pointer colour",
+                        value: "{pointer.color}",
+                        oninput: move |e| if let Some(color) = sanitize_color(&e.value()) { settings.write().pointer.color = color },
+                    }
+                    div { class: "segmented", role: "radiogroup", aria_label: "Pointer shape",
+                        for (shape , label) in shapes {
+                            label { key: "{label}",
+                                input {
+                                    r#type: "radio",
+                                    name: "pointer-shape",
+                                    checked: shape == pointer.shape,
+                                    onchange: move |_| settings.write().pointer.shape = shape,
+                                }
+                                span { "{label}" }
+                            }
+                        }
+                    }
+                }
+                PointerRange {
+                    id: "pointer-size", label: "Size (tenths of a line's height)", min: 1, max: 10, step: 1,
+                    value: pointer.size, unit: "",
+                    onset: move |v| settings.write().pointer.size = v,
+                }
+                PointerRange {
+                    id: "pointer-opacity", label: "Opacity", min: 5, max: 100, step: 5,
+                    value: pointer.opacity, unit: "%",
+                    onset: move |v| settings.write().pointer.opacity = v,
+                }
+                PointerRange {
+                    id: "pointer-trail", label: "Trail", min: 0, max: 10, step: 1,
+                    value: pointer.trail, unit: "",
+                    onset: move |v| settings.write().pointer.trail = v,
+                }
+                if pointer.trail > 0 {
+                    PointerRange {
+                        id: "pointer-trail-distance", label: "Trail distance", min: 1, max: 10, step: 1,
+                        value: pointer.trail_distance, unit: "",
+                        onset: move |v| settings.write().pointer.trail_distance = v,
+                    }
+                }
+                PointerRange {
+                    id: "pointer-blur", label: "Blur", min: 0, max: 10, step: 1,
+                    value: pointer.blur, unit: "",
+                    onset: move |v| settings.write().pointer.blur = v,
+                }
+                PointerRange {
+                    id: "pointer-shrink", label: "Shrink with speed", min: 0, max: 10, step: 1,
+                    value: pointer.shrink, unit: "",
+                    onset: move |v| settings.write().pointer.shrink = v,
+                }
+                PointerRange {
+                    id: "pointer-glow", label: "Glow (stronger colours under the pointer; blur softens its edge)", min: 0, max: 10, step: 1,
+                    value: pointer.glow, unit: "",
+                    onset: move |v| settings.write().pointer.glow = v,
+                }
+            }
         }
     }
 }
@@ -131,7 +283,7 @@ fn MushafFontSection() -> Element {
         (MushafFont::MadaniV2, "Single-colour text in the same 15-line Madani layout."),
     ];
     rsx! {
-        fieldset { class: "settings-card",
+        fieldset {
             legend { "Mushaf font" }
             p { class: "settings-help",
                 "The 15-line Madani mushaf in the King Fahd Complex fonts (Uthman Taha's script)."
@@ -162,7 +314,7 @@ fn WordByWordSection() -> Element {
     let wbw = settings.read().word_by_word.clone();
     let positions = [(WbwDisplay::Inline, "Under each word"), (WbwDisplay::Tooltip, "On hover or tap")];
     rsx! {
-        fieldset { class: "settings-card",
+        fieldset {
             legend { "Word by word" }
             label { class: "settings-check",
                 input {
@@ -237,7 +389,7 @@ fn TranslationsSection() -> Element {
     };
 
     rsx! {
-        fieldset { class: "settings-card",
+        fieldset {
             legend { "Translation" }
             label { class: "settings-check",
                 input {
@@ -322,28 +474,19 @@ fn TranslationsSection() -> Element {
     }
 }
 
-/// Tooltip for a preview word in hover mode (`None` when inline or nothing is shown).
-fn hover_title(inline: bool, wbw: &super::WordByWord, meaning: &str, translit: &str) -> Option<String> {
-    let parts: Vec<&str> = [(wbw.show_translation, meaning), (wbw.show_transliteration, translit)]
-        .into_iter()
-        .filter_map(|(on, text)| on.then_some(text))
-        .collect();
-    (!inline && !parts.is_empty()).then(|| parts.join(" · "))
-}
-
 #[component]
 fn FontSizeSection() -> Element {
     let mut settings = use_settings();
-    let (arabic, translation, wbw) = {
+    let (arabic, translation, word_spacing, meaning_spacing, line_spacing, content_width) = {
         let s = settings.read();
-        (s.arabic_font_scale, s.translation_font_scale, s.word_by_word.clone())
+        (s.arabic_font_scale, s.translation_font_scale, s.word_spacing, s.meaning_spacing, s.line_spacing, s.content_width)
     };
     let parse = |v: String| v.parse::<u8>().ok().map(|n| n.clamp(1, 10));
-    let inline = wbw.display == WbwDisplay::Inline;
+    let parse0 = |v: String| v.parse::<u8>().ok().map(|n| n.min(10));
 
     rsx! {
-        fieldset { class: "settings-card",
-            legend { "Text size" }
+        fieldset {
+            legend { "Text size and layout" }
             label { class: "settings-row", r#for: "arabic-size",
                 span { "Arabic text" }
                 input {
@@ -372,27 +515,64 @@ fn FontSizeSection() -> Element {
                 }
                 output { class: "range-value", "{translation}" }
             }
-            div { class: "font-preview", aria_label: "Preview",
-                p { class: "preview-arabic", dir: "rtl", lang: "ar",
-                    for (i, (ar, meaning, translit)) in PREVIEW_WORDS.iter().enumerate() {
-                        span {
-                            key: "{i}",
-                            class: "preview-word",
-                            title: hover_title(inline, &wbw, meaning, translit),
-                            span { class: "preview-word-ar", "{ar}" }
-                            if inline && wbw.show_translation {
-                                span { class: "preview-word-en", dir: "ltr", lang: "en", "{meaning}" }
-                            }
-                            if inline && wbw.show_transliteration {
-                                span { class: "preview-word-tr", dir: "ltr", lang: "en", "{translit}" }
-                            }
-                        }
-                    }
+            label { class: "settings-row", r#for: "word-spacing",
+                span { "Space between words" }
+                input {
+                    id: "word-spacing",
+                    r#type: "range",
+                    min: "0",
+                    max: "10",
+                    step: "1",
+                    value: "{word_spacing}",
+                    aria_valuetext: "{word_spacing} of 10",
+                    oninput: move |e| if let Some(v) = parse0(e.value()) { settings.write().word_spacing = v },
                 }
-                TranslationText { translation: preview_translation() }
-                p { class: "settings-help preview-note",
-                    "Preview uses a fallback font; the reader draws each page with its mushaf font."
+                output { class: "range-value", "{word_spacing}" }
+            }
+            label { class: "settings-row", r#for: "meaning-spacing",
+                span { "Space above word meanings" }
+                input {
+                    id: "meaning-spacing",
+                    r#type: "range",
+                    min: "0",
+                    max: "10",
+                    step: "1",
+                    value: "{meaning_spacing}",
+                    aria_valuetext: "{meaning_spacing} of 10",
+                    oninput: move |e| if let Some(v) = parse0(e.value()) { settings.write().meaning_spacing = v },
                 }
+                output { class: "range-value", "{meaning_spacing}" }
+            }
+            label { class: "settings-row", r#for: "line-spacing",
+                span { "Line spacing" }
+                input {
+                    id: "line-spacing",
+                    r#type: "range",
+                    min: "0",
+                    max: "10",
+                    step: "1",
+                    value: "{line_spacing}",
+                    aria_valuetext: "{line_spacing} of 10",
+                    oninput: move |e| if let Some(v) = parse0(e.value()) { settings.write().line_spacing = v },
+                }
+                output { class: "range-value", "{line_spacing}" }
+            }
+            label { class: "settings-row", r#for: "content-width",
+                span { "Content width · {super::content_width_px(content_width)} px" }
+                input {
+                    id: "content-width",
+                    r#type: "range",
+                    min: "0",
+                    max: "10",
+                    step: "1",
+                    value: "{content_width}",
+                    aria_valuetext: "{super::content_width_px(content_width)} pixels",
+                    oninput: move |e| if let Some(v) = parse0(e.value()) { settings.write().content_width = v },
+                }
+                output { class: "range-value", "{content_width}" }
+            }
+            p { class: "settings-help",
+                "Spacing applies to the mushaf pages. Line spacing is the space under each line, below the word meanings when they are shown. A page whose lines don't fit the window is scaled down to fit, never wrapped or cut."
             }
         }
     }
@@ -421,7 +601,7 @@ fn AdvancedSection() -> Element {
     };
 
     rsx! {
-        fieldset { class: "settings-card",
+        fieldset {
             legend { "Advanced" }
             div { class: "settings-field",
                 label { r#for: "font-base-url", "Font source URL" }
@@ -433,7 +613,7 @@ fn AdvancedSection() -> Element {
                         spellcheck: "false",
                         autocomplete: "off",
                         autocapitalize: "off",
-                        placeholder: "https://static.qurancdn.com/fonts/quran",
+                        placeholder: super::DEFAULT_FONT_BASES[0],
                         class: if invalid { "invalid" } else { "" },
                         aria_invalid: if invalid { "true" } else { "false" },
                         aria_describedby: "font-base-url-help",
@@ -500,7 +680,8 @@ mod tests {
     #[test]
     fn fallback_list_is_english() {
         let list = fallback_translations();
-        assert_eq!(list.iter().map(|t| t.id).collect::<Vec<_>>(), [131, 20, 85, 84, 19, 22]);
+        assert_eq!(list.iter().map(|t| t.id).collect::<Vec<_>>(), [20, 85, 84, 19, 22]);
+        assert!(list.iter().any(|t| crate::settings::Settings::default().translations.contains(&t.id)));
         assert_eq!(english_translations(&list).len(), list.len());
     }
 
@@ -519,18 +700,6 @@ mod tests {
         let en = english_translations(&sample());
         assert_eq!(selected_label(131, &en), "Clear Quran");
         assert_eq!(selected_label(97, &en), "Translation #97");
-    }
-
-    #[test]
-    fn hover_title_follows_settings() {
-        let mut wbw = crate::settings::WordByWord::default();
-        assert_eq!(hover_title(true, &wbw, "a", "b"), None);
-        assert_eq!(hover_title(false, &wbw, "a", "b").as_deref(), Some("a"));
-        wbw.show_transliteration = true;
-        assert_eq!(hover_title(false, &wbw, "a", "b").as_deref(), Some("a · b"));
-        wbw.show_translation = false;
-        wbw.show_transliteration = false;
-        assert_eq!(hover_title(false, &wbw, "a", "b"), None);
     }
 
     #[test]

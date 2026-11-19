@@ -3,6 +3,8 @@
 
 use quran_api::Word;
 
+use super::mushaf_layout::WordCell;
+
 /// Placeholder for a word without any glyph or text (never render nothing).
 pub const MISSING_WORD: &str = "⟨?⟩";
 
@@ -11,8 +13,8 @@ pub const MISSING_WORD: &str = "⟨?⟩";
 pub enum WordMode {
     /// QCF glyph code(s) in the page font `family`.
     Glyph { glyph: String, family: String },
-    /// Unicode text in the fallback font stack.
-    Text(String),
+    /// Unicode text; `qpc`: in the QPC encoding the Hafs fallback font draws.
+    Text { text: String, qpc: bool },
     /// Nothing to draw: show [`MISSING_WORD`].
     Missing,
 }
@@ -22,7 +24,27 @@ impl WordMode {
     pub fn attr(&self) -> &'static str {
         match self {
             WordMode::Glyph { .. } => "glyph",
-            WordMode::Text(_) | WordMode::Missing => "text",
+            WordMode::Text { .. } | WordMode::Missing => "text",
+        }
+    }
+
+    /// The text the word shows.
+    pub fn text(&self) -> &str {
+        match self {
+            WordMode::Glyph { glyph, .. } => glyph,
+            WordMode::Text { text, .. } => text,
+            WordMode::Missing => MISSING_WORD,
+        }
+    }
+
+    /// CSS class choosing the font: the page font (set inline), the Hafs
+    /// fallback face, or a general Quran face.
+    pub fn class(&self) -> &'static str {
+        match self {
+            WordMode::Glyph { .. } => "glyph",
+            WordMode::Text { qpc: true, .. } => "qpc",
+            WordMode::Text { qpc: false, .. } => "uthmani",
+            WordMode::Missing => "missing",
         }
     }
 }
@@ -60,12 +82,12 @@ pub fn decode_glyph(code: &str) -> String {
     out.trim().to_string()
 }
 
-/// The word's Unicode text: `qpc_uthmani_hafs` → `text_uthmani` → `text`.
-pub fn unicode_text(word: &Word) -> Option<String> {
-    [word.qpc_uthmani_hafs.as_deref(), word.text_uthmani.as_deref(), word.text.as_deref()]
-        .into_iter()
-        .find_map(non_empty)
-        .map(str::to_string)
+/// The word's own Unicode text and whether it is QPC-encoded: `qpc_uthmani_hafs`
+/// → `text_uthmani`. (`text` is not used: with a mushaf selected it holds the
+/// glyph code, which is not readable text.)
+pub fn unicode_text(word: &Word) -> Option<(String, bool)> {
+    let qpc = non_empty(word.qpc_uthmani_hafs.as_deref()).map(|t| (t.to_string(), true));
+    qpc.or_else(|| non_empty(word.text_uthmani.as_deref()).map(|t| (t.to_string(), false)))
 }
 
 /// The word's glyph code, if it has one that belongs to its layout page
@@ -77,18 +99,13 @@ pub fn glyph_code(word: &Word) -> Option<String> {
     non_empty(word.code_v2.as_deref()).map(decode_glyph).filter(|g| !g.is_empty())
 }
 
-/// Choose how to draw a word. `glyph` is the word's glyph code (see
-/// [`glyph_code`]), `text` its Unicode text, `font_ready` whether the QCF font of
-/// the page is loaded, and `family` that font's CSS family.
-pub fn choose_mode(glyph: Option<&str>, text: Option<&str>, font_ready: bool, family: &str) -> WordMode {
-    match (glyph, font_ready) {
-        (Some(g), true) if !g.trim().is_empty() => {
-            WordMode::Glyph { glyph: g.to_string(), family: family.to_string() }
-        }
-        _ => match non_empty(text) {
-            Some(t) => WordMode::Text(t.to_string()),
-            None => WordMode::Missing,
-        },
+/// Choose how to draw a cell: its glyph if `font_ready` (the QCF font of its
+/// page, CSS family `family`, is loaded), else its Unicode text.
+pub fn choose_mode(cell: &WordCell, font_ready: bool, family: &str) -> WordMode {
+    match (non_empty(cell.glyph.as_deref()), non_empty(cell.text.as_deref())) {
+        (Some(g), _) if font_ready => WordMode::Glyph { glyph: g.to_string(), family: family.to_string() },
+        (_, Some(t)) => WordMode::Text { text: t.to_string(), qpc: cell.qpc },
+        _ => WordMode::Missing,
     }
 }
 
@@ -97,10 +114,6 @@ pub fn arabic_number(n: u16) -> String {
     n.to_string().chars().map(|c| c.to_digit(10).and_then(|d| char::from_u32(0x0660 + d)).unwrap_or(c)).collect()
 }
 
-/// Unicode ayah-end marker, e.g. `﴿٢٥٥﴾` (ornate parentheses around the number).
-pub fn unicode_ayah_marker(verse_number: u16) -> String {
-    format!("\u{fd3f}{}\u{fd3e}", arabic_number(verse_number))
-}
 
 #[cfg(test)]
 mod tests {
@@ -110,37 +123,47 @@ mod tests {
         Word { id: 1, position: 1, char_type_name: "word".into(), ..Default::default() }
     }
 
+    fn cell(glyph: Option<&str>, text: Option<&str>) -> WordCell {
+        WordCell { glyph: glyph.map(Into::into), text: text.map(Into::into), ..WordCell::default() }
+    }
+
     #[test]
     fn glyph_only_when_font_loaded_and_code_present() {
         let fam = "p2-v4";
+        let text = |t: &str| WordMode::Text { text: t.into(), qpc: false };
         assert_eq!(
-            choose_mode(Some("\u{fb51}"), Some("بِسْمِ"), true, fam),
+            choose_mode(&cell(Some("\u{fb51}"), Some("بِسْمِ")), true, fam),
             WordMode::Glyph { glyph: "\u{fb51}".into(), family: fam.into() }
         );
         // Font not loaded (yet / failed) → Unicode text.
-        assert_eq!(choose_mode(Some("\u{fb51}"), Some("بِسْمِ"), false, fam), WordMode::Text("بِسْمِ".into()));
+        assert_eq!(choose_mode(&cell(Some("\u{fb51}"), Some("بِسْمِ")), false, fam), text("بِسْمِ"));
         // No glyph code → text even if the font is loaded.
-        assert_eq!(choose_mode(None, Some("t"), true, fam), WordMode::Text("t".into()));
-        assert_eq!(choose_mode(Some("  "), Some("t"), true, fam), WordMode::Text("t".into()));
+        assert_eq!(choose_mode(&cell(None, Some("t")), true, fam), text("t"));
+        assert_eq!(choose_mode(&cell(Some("  "), Some("t")), true, fam), text("t"));
         // Nothing at all → placeholder.
-        assert_eq!(choose_mode(None, Some(" "), true, fam), WordMode::Missing);
-        assert_eq!(choose_mode(Some("g"), None, false, fam), WordMode::Missing);
-        assert_eq!(WordMode::Missing.attr(), "text");
-        assert_eq!(choose_mode(Some("g"), None, true, fam).attr(), "glyph");
+        assert_eq!(choose_mode(&cell(None, Some(" ")), true, fam), WordMode::Missing);
+        assert_eq!(choose_mode(&cell(Some("g"), None), false, fam), WordMode::Missing);
+        assert_eq!((WordMode::Missing.attr(), WordMode::Missing.text()), ("text", MISSING_WORD));
+        assert_eq!(choose_mode(&cell(Some("g"), None), true, fam).attr(), "glyph");
+        // QPC-encoded text is drawn with the Hafs fallback font.
+        let qpc = WordCell { qpc: true, ..cell(None, Some("بِسۡمِ")) };
+        assert_eq!(choose_mode(&qpc, true, fam).class(), "qpc");
+        assert_eq!(text("t").class(), "uthmani");
     }
 
     #[test]
     fn unicode_fallback_chain() {
         let mut w = word();
         assert_eq!(unicode_text(&w), None);
-        w.text = Some("t".into());
-        assert_eq!(unicode_text(&w).as_deref(), Some("t"));
+        // `text` holds the glyph code when a mushaf is selected: never shown as text.
+        w.text = Some("\u{fb51}".into());
+        assert_eq!(unicode_text(&w), None);
         w.text_uthmani = Some("u".into());
-        assert_eq!(unicode_text(&w).as_deref(), Some("u"));
+        assert_eq!(unicode_text(&w), Some(("u".into(), false)));
         w.qpc_uthmani_hafs = Some(" ".into());
-        assert_eq!(unicode_text(&w).as_deref(), Some("u"));
+        assert_eq!(unicode_text(&w), Some(("u".into(), false)));
         w.qpc_uthmani_hafs = Some("q".into());
-        assert_eq!(unicode_text(&w).as_deref(), Some("q"));
+        assert_eq!(unicode_text(&w), Some(("q".into(), true)));
     }
 
     #[test]
@@ -167,8 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn markers() {
+    fn arabic_numbers() {
         assert_eq!(arabic_number(255), "٢٥٥");
-        assert_eq!(unicode_ayah_marker(7), "\u{fd3f}٧\u{fd3e}");
     }
 }

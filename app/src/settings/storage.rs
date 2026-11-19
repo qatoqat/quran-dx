@@ -1,4 +1,5 @@
-//! Settings persistence: localStorage on web, a JSON file on desktop.
+//! Settings persistence: localStorage on web, a JSON file on desktop. The
+//! desktop app also keeps the location it was last at (the browser has the URL).
 //!
 //! All parsing/serialization lives in plain functions so it can be unit-tested
 //! on any target. Missing or corrupt data yields `None`; nothing here panics.
@@ -34,8 +35,22 @@ pub fn from_json(raw: &str) -> Option<Settings> {
 pub fn normalize(s: &mut Settings) {
     s.arabic_font_scale = s.arabic_font_scale.clamp(1, 10);
     s.translation_font_scale = s.translation_font_scale.clamp(1, 10);
-    // The app is English-only: word meanings and translations are always English.
-    s.locale = "en".into();
+    s.word_spacing = s.word_spacing.min(10);
+    s.line_spacing = s.line_spacing.min(10);
+    s.meaning_spacing = s.meaning_spacing.min(10);
+    s.content_width = s.content_width.min(10);
+    let custom = &mut s.custom_theme;
+    custom.background = super::sanitize_color(&custom.background).unwrap_or_else(|| super::DEFAULT_CUSTOM_BACKGROUND.into());
+    custom.accent = super::sanitize_color(&custom.accent).unwrap_or_else(|| super::DEFAULT_ACCENT.into());
+    let pointer = &mut s.pointer;
+    pointer.size = pointer.size.clamp(1, 10);
+    pointer.opacity = pointer.opacity.clamp(5, 100);
+    pointer.trail = pointer.trail.min(10);
+    pointer.trail_distance = pointer.trail_distance.clamp(1, 10);
+    pointer.blur = pointer.blur.min(10);
+    pointer.glow = pointer.glow.min(10);
+    pointer.shrink = pointer.shrink.min(10);
+    pointer.color = super::sanitize_color(&pointer.color).unwrap_or_else(|| super::DEFAULT_POINTER_COLOR.into());
     let mut seen = std::collections::HashSet::new();
     s.translations.retain(|id| seen.insert(*id));
     s.font_base_url = sanitize_font_base_url(&s.font_base_url).unwrap_or_default();
@@ -68,64 +83,32 @@ pub fn sanitize_font_base_url(raw: &str) -> Option<String> {
 
 /// Load persisted settings for the current platform.
 pub fn load() -> Option<Settings> {
-    // Chosen by build target, not just features: a desktop build may still have the
-    // `web` feature enabled, and web-sys calls panic on native targets.
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    return web_backend::load();
-    #[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
-    return desktop_backend::load();
-    #[allow(unreachable_code)]
-    None
+    backend::load()
 }
 
-/// Persist settings for the current platform. Failures are silently ignored.
+/// Persist settings for the current platform. Failures are ignored: settings
+/// just won't persist (storage quota, read-only home, private browsing).
 pub fn save(settings: &Settings) {
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    web_backend::save(settings);
-    #[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
-    desktop_backend::save(settings);
-    let _ = settings;
+    backend::save(settings);
 }
 
-/// Read settings from a JSON file. Missing/unreadable/corrupt file → `None`.
-#[cfg_attr(any(feature = "web", not(feature = "desktop")), allow(dead_code))]
-pub fn load_from_path(path: &std::path::Path) -> Option<Settings> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    from_json(&raw)
+/// Desktop: where the app was last (`/2#2:142`), to start there next time.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_location() -> Option<String> {
+    backend::load_location()
 }
 
-/// Atomically write settings JSON to `path`: create the parent directory, write a
-/// sibling temp file, then rename it over the target.
-#[cfg_attr(any(feature = "web", not(feature = "desktop")), allow(dead_code))]
-pub fn save_to_path(path: &std::path::Path, settings: &Settings) -> std::io::Result<()> {
-    use std::io::Write;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
-    tmp_name.push(".tmp");
-    let tmp = path.with_file_name(tmp_name);
-    let result = (|| {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(to_json(settings).as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_location(location: &str) {
+    backend::save_location(location);
 }
 
-/// Compiled whenever `web` is on (so it is type-checked on native too), used only on wasm32.
-#[cfg(feature = "web")]
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-mod web_backend {
+/// Browser: `localStorage`.
+#[cfg(target_arch = "wasm32")]
+mod backend {
     use super::Settings;
 
-    /// localStorage key.
-    pub const STORAGE_KEY: &str = "quran-settings-v1";
+    const STORAGE_KEY: &str = "quran-settings-v1";
 
     fn storage() -> Option<web_sys::Storage> {
         // `local_storage()` errors e.g. in sandboxed iframes / privacy modes.
@@ -133,50 +116,96 @@ mod web_backend {
     }
 
     pub fn load() -> Option<Settings> {
-        let raw = storage()?.get_item(STORAGE_KEY).ok().flatten()?;
-        super::from_json(&raw)
+        super::from_json(&storage()?.get_item(STORAGE_KEY).ok().flatten()?)
     }
 
     pub fn save(settings: &Settings) {
         if let Some(s) = storage() {
-            // Quota errors etc. are non-fatal: settings just won't persist.
             let _ = s.set_item(STORAGE_KEY, &super::to_json(settings));
         }
     }
 }
 
-#[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
-mod desktop_backend {
-    use super::Settings;
-    use std::path::PathBuf;
+/// Desktop: `<config dir>/quran-app/settings.json`.
+#[cfg(not(target_arch = "wasm32"))]
+mod backend {
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
 
-    /// `<config dir>/quran-app/settings.json`
-    fn settings_path() -> Option<PathBuf> {
-        Some(dirs::config_dir()?.join("quran-app").join("settings.json"))
+    use super::Settings;
+
+    fn file(name: &str) -> Option<PathBuf> {
+        // Tests must not read or overwrite the user's real files.
+        if cfg!(test) {
+            return None;
+        }
+        Some(dirs::config_dir()?.join("quran-app").join(name))
     }
 
     pub fn load() -> Option<Settings> {
-        super::load_from_path(&settings_path()?)
+        load_from_path(&file("settings.json")?)
     }
 
     pub fn save(settings: &Settings) {
-        if let Some(path) = settings_path() {
-            // Non-fatal: settings just won't persist (e.g. read-only home).
-            let _ = super::save_to_path(&path, settings);
+        if let Some(path) = file("settings.json") {
+            let _ = save_to_path(&path, settings);
         }
+    }
+
+    pub fn load_location() -> Option<String> {
+        let location = std::fs::read_to_string(file("location")?).ok()?;
+        let location = location.trim();
+        location.starts_with('/').then(|| location.to_string())
+    }
+
+    pub fn save_location(location: &str) {
+        if let Some(path) = file("location") {
+            let _ = write_atomic(&path, location);
+        }
+    }
+
+    /// Read settings from a JSON file. Missing/unreadable/corrupt file → `None`.
+    pub fn load_from_path(path: &Path) -> Option<Settings> {
+        super::from_json(&std::fs::read_to_string(path).ok()?)
+    }
+
+    pub fn save_to_path(path: &Path, settings: &Settings) -> std::io::Result<()> {
+        write_atomic(path, &super::to_json(settings))
+    }
+
+    /// Atomically write `text` to `path`: create the parent directory, write a
+    /// sibling temp file, then rename it over the target.
+    fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+        tmp_name.push(".tmp");
+        let tmp = path.with_file_name(tmp_name);
+        let result = (|| {
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&tmp, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::backend::{load_from_path, save_to_path};
     use super::*;
-    use crate::settings::{MushafFont, QuranScript, WbwDisplay};
+    use crate::settings::{MushafFont, WbwDisplay};
 
     #[test]
     fn roundtrip() {
         let s = Settings {
             translations: vec![20, 131],
-            script: QuranScript::IndoPak,
             arabic_font_scale: 9,
             word_by_word: crate::settings::WordByWord {
                 display: WbwDisplay::Tooltip,
@@ -194,7 +223,7 @@ mod tests {
     #[test]
     fn corrupt_or_empty_is_none() {
         for raw in ["", "   ", "not json", "{", "[1,2]", "null", "42", r#"{"translations": "x"}"#,
-            r#"{"script": "Klingon"}"#, r#"{"arabic_font_scale": 300}"#, "\u{0}\u{1}",
+            r#"{"arabic_font_scale": 300}"#, "\u{0}\u{1}",
             r#"{"mushaf_font": "V9"}"#, r#"{"font_base_url": 7}"#, r#"{"show_page_translation": "yes"}"#]
         {
             assert_eq!(from_json(raw), None, "input: {raw:?}");
@@ -203,9 +232,9 @@ mod tests {
 
     #[test]
     fn partial_uses_defaults_and_ignores_unknown() {
-        let s = from_json(r#"{"locale":"en","future_field":true,"word_by_word":{"display":"Inline"}}"#)
+        // Unknown fields include ones older versions stored (`locale`, `script`, `reciter`).
+        let s = from_json(r#"{"locale":"ur","script":"IndoPak","reciter":7,"word_by_word":{"display":"Inline"}}"#)
             .unwrap();
-        assert_eq!(s.locale, "en");
         assert_eq!(s.translations, Settings::default().translations);
         assert_eq!(s.word_by_word.display, WbwDisplay::Inline);
         assert!(s.word_by_word.show_translation);
@@ -215,12 +244,11 @@ mod tests {
     #[test]
     fn values_are_normalized() {
         let s = from_json(
-            r#"{"arabic_font_scale":0,"translation_font_scale":99,"locale":"<script>","translations":[1,2,1,3,2]}"#,
+            r#"{"arabic_font_scale":0,"translation_font_scale":99,"translations":[1,2,1,3,2]}"#,
         )
         .unwrap();
         assert_eq!(s.arabic_font_scale, 1);
         assert_eq!(s.translation_font_scale, 10);
-        assert_eq!(s.locale, "en");
         assert_eq!(s.translations, vec![1, 2, 3]);
     }
 
@@ -259,18 +287,10 @@ mod tests {
     #[test]
     fn accepts_word_check_tool_settings() {
         // Exactly what tools/word-check/check-words.mjs writes to localStorage.
-        let json = r#"{"script":"IndoPak","word_by_word":{"show_translation":true,"show_transliteration":true,"display":"Inline"}}"#;
+        let json = r#"{"mushaf_font":"MadaniV2","word_by_word":{"show_translation":true,"show_transliteration":true,"display":"Tooltip"}}"#;
         let s = from_json(json).expect("tool settings must parse");
-        assert_eq!(s.script, QuranScript::IndoPak);
-        assert_eq!(s.word_by_word.display, WbwDisplay::Inline);
-        assert_eq!(s.locale, "en");
-    }
-
-    #[test]
-    fn locale_is_forced_to_english() {
-        for raw in [r#"{"locale":"ur"}"#, r#"{"locale":"id"}"#, r#"{"locale":""}"#, r#"{"locale":"<x>"}"#] {
-            assert_eq!(from_json(raw).unwrap().locale, "en", "{raw}");
-        }
+        assert_eq!(s.mushaf_font, MushafFont::MadaniV2);
+        assert_eq!(s.word_by_word.display, WbwDisplay::Tooltip);
     }
 
     #[test]

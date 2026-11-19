@@ -1,37 +1,164 @@
-//! User settings: shared state (CONTRACT), persistence, settings page,
-//! word-by-word rendering and footnotes.
-//!
-//! CONTRACT for other modules: `Settings` fields/methods below, `use_settings()`,
-//! `provide_settings()`, `FontLoader`, `SettingsPage`,
-//! `wbw::TranslationText`. Add fields freely; don't rename/remove.
+//! User settings: shared state, persistence, the settings panel, the theme and
+//! the reading pointer, and verse translation text with footnotes.
 
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub mod html;
 pub mod storage;
-pub mod wbw;
+pub mod translation;
 
-mod page;
-pub use page::SettingsPage;
+mod panel;
+mod pointer;
+pub use panel::SettingsPanel;
+pub use pointer::use_reading_pointer;
 
-/// Which Arabic script/text field to render.
+/// Colours of the app. `Auto` follows the system's light or dark setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum QuranScript {
+pub enum Theme {
     #[default]
-    Uthmani,
-    IndoPak,
+    Auto,
+    Light,
+    Dark,
+    Sepia,
+    /// The reader's own background and accent ([`CustomTheme`]); every other
+    /// colour is a shade worked out from those two.
+    Custom,
 }
 
-impl QuranScript {
-    /// API field name for this script (verse `fields` and `word_fields`).
-    #[allow(dead_code)] // used by the reader module
-    pub fn field(self) -> &'static str {
+/// The two colours a custom theme is built from, as `#rrggbb`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomTheme {
+    pub background: String,
+    pub accent: String,
+}
+
+pub const DEFAULT_CUSTOM_BACKGROUND: &str = "#101a2b";
+pub const DEFAULT_ACCENT: &str = "#2ca4ab";
+
+impl Default for CustomTheme {
+    fn default() -> Self {
+        Self { background: DEFAULT_CUSTOM_BACKGROUND.into(), accent: DEFAULT_ACCENT.into() }
+    }
+}
+
+/// Relative luminance (WCAG) of a `#rrggbb` colour: 0 = black, 1 = white.
+pub fn luminance(color: &str) -> Option<f64> {
+    let hex = sanitize_color(color)?;
+    let channel = |i: usize| {
+        let c = f64::from(u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0)) / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    Some(0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5))
+}
+
+impl CustomTheme {
+    fn background(&self) -> String {
+        sanitize_color(&self.background).unwrap_or_else(|| DEFAULT_CUSTOM_BACKGROUND.into())
+    }
+
+    /// A background on which white text reads better than black.
+    pub fn is_dark(&self) -> bool {
+        luminance(&self.background()).unwrap_or(0.0) < 0.179
+    }
+
+    /// The whole palette from the two colours: text is near white or near black
+    /// (whichever contrasts with the background) with a touch of the background
+    /// in it; cards, borders and muted text are mixes of the text and the
+    /// background; text on the accent is black or white by the accent's lightness.
+    fn css(&self) -> String {
+        let bg = self.background();
+        let accent = sanitize_color(&self.accent).unwrap_or_else(|| DEFAULT_ACCENT.into());
+        let on_accent = if luminance(&accent).unwrap_or(0.0) < 0.35 { "#fff" } else { "#111" };
+        let (scheme, ink, lift, tip) = if self.is_dark() {
+            ("dark", "white", 6, "color-mix(in oklab, var(--bg) 82%, white)")
+        } else {
+            ("light", "black", 45, "var(--fg)")
+        };
+        format!(
+            ":root {{ color-scheme: {scheme}; --bg: {bg}; --fg: color-mix(in oklab, {bg} 10%, {ink}); \
+             --card: color-mix(in oklab, {bg}, white {lift}%); --border: color-mix(in oklab, var(--fg) 15%, var(--bg)); \
+             --muted: color-mix(in oklab, var(--fg) 60%, var(--bg)); --accent: {accent}; --on-accent: {on_accent}; \
+             --tip-bg: {tip}; }}"
+        )
+    }
+}
+
+/// Sepia: the light colours on warm paper.
+const SEPIA_CSS: &str = ":root { color-scheme: light; --bg: #f4ecd8; --fg: #3b2f20; --muted: #7b6a55; \
+    --border: #dccfb2; --card: #fbf5e4; --ornament: #96690f; --tip-bg: #3b2f20; }";
+
+impl Theme {
+    pub const ALL: [Theme; 5] = [Theme::Auto, Theme::Light, Theme::Dark, Theme::Sepia, Theme::Custom];
+
+    pub fn label(self) -> &'static str {
         match self {
-            QuranScript::Uthmani => "text_uthmani",
-            QuranScript::IndoPak => "text_indopak",
+            Theme::Auto => "Auto",
+            Theme::Light => "Light",
+            Theme::Dark => "Dark",
+            Theme::Sepia => "Sepia",
+            Theme::Custom => "Custom",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PointerShape {
+    /// A filled disc.
+    #[default]
+    Circle,
+    /// An outline.
+    Ring,
+}
+
+/// A reading pointer that replaces the mouse cursor below the header.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Pointer {
+    pub enabled: bool,
+    pub shape: PointerShape,
+    /// `#rrggbb`.
+    pub color: String,
+    /// Diameter in tenths of a mushaf line's height, 1..=10.
+    pub size: u8,
+    /// Percent, 5..=100.
+    pub opacity: u8,
+    /// Number of fading copies that follow it, 0..=10.
+    pub trail: u8,
+    /// How far those copies fall behind, 1..=10 (5 = default look).
+    pub trail_distance: u8,
+    /// Softness of its edge, 0..=10.
+    pub blur: u8,
+    /// How much the colours of the text under it are intensified, 0..=10.
+    pub glow: u8,
+    /// How much it shrinks while the mouse moves fast, 0..=10.
+    pub shrink: u8,
+}
+
+pub const DEFAULT_POINTER_COLOR: &str = "#ffffff";
+
+impl Default for Pointer {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            shape: PointerShape::Circle,
+            color: DEFAULT_POINTER_COLOR.into(),
+            size: 5,
+            opacity: 50,
+            trail: 0,
+            trail_distance: 5,
+            blur: 0,
+            glow: 0,
+            shrink: 0,
+        }
+    }
+}
+
+/// `#rrggbb` (lower case) if `color` is one, so it can go into a stylesheet as is.
+pub fn sanitize_color(color: &str) -> Option<String> {
+    let hex = color.trim().strip_prefix('#')?;
+    (hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit())).then(|| format!("#{}", hex.to_ascii_lowercase()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -63,24 +190,6 @@ impl MushafFont {
         }
     }
 
-    /// Path of a page's font file below the font base URL (quran.com layout).
-    #[allow(dead_code)] // used by the reader module
-    pub fn font_path(self, page: u16) -> String {
-        match self {
-            MushafFont::TajweedV4 => format!("hafs/v4/colrv1/woff2/p{page}.woff2"),
-            MushafFont::MadaniV2 => format!("hafs/v2/woff2/p{page}.woff2"),
-        }
-    }
-
-    /// CSS font-family name registered for a page, e.g. `p526-v4`.
-    #[allow(dead_code)] // used by the reader module
-    pub fn family(self, page: u16) -> String {
-        match self {
-            MushafFont::TajweedV4 => format!("p{page}-v4"),
-            MushafFont::MadaniV2 => format!("p{page}-v2"),
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             MushafFont::TajweedV4 => "Tajweed colours (QCF V4)",
@@ -93,7 +202,10 @@ impl MushafFont {
 /// quran.com `fonts/quran/...` layout (`hafs/v4/colrv1/woff2/p1.woff2`, ...).
 /// A user-set `Settings::font_base_url` is tried first.
 pub const DEFAULT_FONT_BASES: &[&str] =
-    &["https://static.qurancdn.com/fonts/quran", "https://quran.com/fonts/quran"];
+    &["https://verses.quran.foundation/fonts/quran", "https://quran.com/fonts/quran"];
+
+/// Language of chapter names, word meanings and search (the app is English-only).
+pub const LANGUAGE: &str = "en";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -112,63 +224,65 @@ impl Default for WordByWord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// ISO code used for chapter names and word-by-word language (`en`, `ur`, `id`, ...).
-    pub locale: String,
     /// Selected translation resource ids, in display order.
     pub translations: Vec<u32>,
-    pub script: QuranScript,
     /// 1..=10 scale for the Arabic text.
     pub arabic_font_scale: u8,
     /// 1..=10 scale for translations.
     pub translation_font_scale: u8,
     pub word_by_word: WordByWord,
-    /// Saved for future audio support (7 = Mishari Rashid al-Afasy).
-    pub reciter: u32,
     /// Font set for the 15-line mushaf pages.
     pub mushaf_font: MushafFont,
     /// Show each page's verse translations under the page.
     pub show_page_translation: bool,
     /// Optional custom font base URL (e.g. a self-hosted copy); empty = defaults.
     pub font_base_url: String,
+    /// Space between words on mushaf lines, 0..=10 (2 = default look).
+    pub word_spacing: u8,
+    /// Space under each mushaf line (below its word meanings, when shown), 0..=10 (4 = default look).
+    pub line_spacing: u8,
+    /// Space between a word and its meaning underneath, 0..=10 (4 = default look).
+    pub meaning_spacing: u8,
+    /// Extra width of the content column, 0..=10 steps (0 = default width).
+    pub content_width: u8,
+    pub theme: Theme,
+    pub custom_theme: CustomTheme,
+    pub pointer: Pointer,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            locale: "en".into(),
-            translations: vec![131],
-            script: QuranScript::Uthmani,
+            // Saheeh International (the API no longer serves 131, The Clear Quran).
+            translations: vec![20],
             arabic_font_scale: 4,
             translation_font_scale: 3,
             word_by_word: WordByWord::default(),
-            reciter: 7,
             mushaf_font: MushafFont::TajweedV4,
             show_page_translation: false,
             font_base_url: String::new(),
+            word_spacing: DEFAULT_WORD_SPACING,
+            line_spacing: DEFAULT_LINE_SPACING,
+            meaning_spacing: DEFAULT_MEANING_SPACING,
+            content_width: 0,
+            theme: Theme::default(),
+            custom_theme: CustomTheme::default(),
+            pointer: Pointer::default(),
         }
     }
 }
 
 impl Settings {
     /// Query to use for every `/verses/by_*` request.
-    #[allow(dead_code)] // used by the reader module
     pub fn verse_query(&self) -> quran_api::VerseQuery {
         let strings = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         quran_api::VerseQuery {
-            // English only: word-by-word meanings and translations.
-            language: "en".into(),
+            language: LANGUAGE.into(),
             translations: self.translations.clone(),
             words: true,
             fields: strings(&["text_uthmani", "qpc_uthmani_hafs"]),
-            word_fields: strings(&[
-                "location",
-                "code_v2",
-                "v2_page",
-                "page_number",
-                "line_number",
-                "qpc_uthmani_hafs",
-                "text_uthmani",
-            ]),
+            // The API has no per-word `qpc_uthmani_hafs`; the verse-level text is split instead.
+            word_fields: strings(&["code_v2", "v2_page", "page_number", "line_number", "text_uthmani"]),
             translation_fields: strings(&["resource_name", "language_name"]),
             page: 1,
             per_page: 50,
@@ -199,37 +313,10 @@ pub fn use_settings() -> Signal<Settings> {
     use_context::<Signal<Settings>>()
 }
 
-/// Google Fonts stylesheet for Amiri Quran, the last-resort Arabic fallback
-/// (browsers only download it if no earlier face in the stack has the glyphs).
+/// Google Fonts stylesheet: Amiri Quran for Quran text outside the page fonts,
+/// Noto Naskh Arabic for surah names.
 const GOOGLE_FONTS_CSS: &str =
     "https://fonts.googleapis.com/css2?family=Amiri+Quran&family=Noto+Naskh+Arabic:wght@400;600&display=swap";
-
-/// `--arabic-font`: fallback stack for Arabic text outside the QCF page fonts
-/// (the reader registers the `UthmanicHafs` face and the per-page QCF faces).
-pub const ARABIC_FONT_STACK: &str =
-    r#""UthmanicHafs", "KFGQPC Uthmanic Script HAFS", "Amiri Quran", serif"#;
-
-impl QuranScript {
-    /// CSS `font-family` for this (legacy) script choice. No longer used for
-    /// rendering; see [`ARABIC_FONT_STACK`].
-    #[allow(dead_code)]
-    pub fn font_family(self) -> &'static str {
-        match self {
-            QuranScript::Uthmani => ARABIC_FONT_STACK,
-            QuranScript::IndoPak => {
-                r#""Noto Nastaliq Urdu", "Jameel Noori Nastaleeq", "Scheherazade New", serif"#
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn label(self) -> &'static str {
-        match self {
-            QuranScript::Uthmani => "Uthmani",
-            QuranScript::IndoPak => "IndoPak (Nastaliq)",
-        }
-    }
-}
 
 /// Format thousandths of a rem as a CSS length, e.g. `1050` → `1.05rem`.
 fn fmt_rem(milli: u32) -> String {
@@ -258,14 +345,75 @@ pub fn translation_font_size(scale: u8) -> String {
     fmt_rem(800 + 125 * (s - 1))
 }
 
-/// CSS custom properties derived from settings.
+impl Settings {
+    /// Whether the theme is dark (`Some`), or follows the system (`None`).
+    pub fn dark(&self) -> Option<bool> {
+        match self.theme {
+            Theme::Auto => None,
+            Theme::Dark => Some(true),
+            Theme::Light | Theme::Sepia => Some(false),
+            Theme::Custom => Some(self.custom_theme.is_dark()),
+        }
+    }
+
+    /// Overrides of the stylesheet, whose colours are `light-dark()` pairs.
+    fn theme_css(&self) -> String {
+        match self.theme {
+            Theme::Auto => String::new(),
+            Theme::Light => ":root { color-scheme: light; }".into(),
+            Theme::Dark => ":root { color-scheme: dark; }".into(),
+            Theme::Sepia => SEPIA_CSS.into(),
+            Theme::Custom => self.custom_theme.css(),
+        }
+    }
+}
+
+/// CSS derived from settings: sizes, spacing and the pointer as custom
+/// properties, and the theme's colours.
 pub fn css_variables(settings: &Settings) -> String {
+    let pointer = &settings.pointer;
     format!(
-        ":root {{ --arabic-size: {}; --translation-size: {}; --arabic-font: {}; }}",
+        ":root {{ --arabic-size: {}; --translation-size: {}; --mushaf-word-gap: {}; --mushaf-line-gap: {}; \
+         --mushaf-meaning-gap: {}; --content-width: {}px; --pointer-color: {}; --pointer-size: {}; --pointer-opacity: {}; --pointer-blur: {}; --pointer-glow: {}; }}\n{}",
         arabic_font_size(settings.arabic_font_scale),
         translation_font_size(settings.translation_font_scale),
-        ARABIC_FONT_STACK,
+        word_gap(settings.word_spacing),
+        line_gap(settings.line_spacing),
+        meaning_gap(settings.meaning_spacing),
+        content_width_px(settings.content_width),
+        sanitize_color(&pointer.color).unwrap_or_else(|| DEFAULT_POINTER_COLOR.into()),
+        f64::from(pointer.size.clamp(1, 10)) / 10.0,
+        f64::from(pointer.opacity.clamp(5, 100)) / 100.0,
+        f64::from(pointer.blur.min(10)) * 3.0 / 100.0,
+        pointer.glow.min(10),
+        settings.theme_css(),
     )
+}
+
+/// Width of the content column (header and pages) in CSS px: 0 → 960 (default),
+/// then 160 more per step, up to 2560 at 10. The window still limits it.
+pub fn content_width_px(step: u8) -> u32 {
+    960 + 160 * u32::from(step.min(10))
+}
+
+pub const DEFAULT_WORD_SPACING: u8 = 2;
+pub const DEFAULT_LINE_SPACING: u8 = 4;
+pub const DEFAULT_MEANING_SPACING: u8 = 4;
+
+/// Minimum gap between words on a mushaf line, in glyph `em`: 0 → 0em … 10 → 0.6em.
+pub fn word_gap(step: u8) -> String {
+    format!("{}em", f64::from(step.min(10)) * 6.0 / 100.0)
+}
+
+/// Space under a mushaf line, in glyph em (unitless): 0 → 0 … 4 → 0.4 (default) … 10 → 1.
+pub fn line_gap(step: u8) -> String {
+    format!("{}", f64::from(step.min(10)) / 10.0)
+}
+
+/// Space between a word and its meaning, in glyph em (unitless): 0 → -0.12 (tucked
+/// under the word) … 4 → 0.12 (default) … 10 → 0.48.
+pub fn meaning_gap(step: u8) -> String {
+    format!("{}", (f64::from(step.min(10)) * 6.0 - 12.0) / 100.0)
 }
 
 /// Right-to-left languages, matched by ISO code (`ur`, `ar-SA`) or by English
@@ -281,69 +429,88 @@ pub fn is_rtl_language(lang: &str) -> bool {
     CODES.contains(&code) || NAMES.contains(&lang.as_str())
 }
 
-/// Sanitize a locale for use as an HTML `lang` value (and inside a JS string).
-#[allow(dead_code)] // the app is English-only for now
-pub fn safe_lang_tag(locale: &str) -> String {
-    let ok = !locale.is_empty()
-        && locale.len() <= 16
-        && locale.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    if ok { locale.replace('_', "-") } else { "en".into() }
-}
-
-/// `scheme://host[:port]` of an http(s) URL; `None` for paths and other schemes.
-pub fn url_origin(url: &str) -> Option<String> {
-    let url = url.trim();
-    let lower = url.to_ascii_lowercase();
-    let scheme_len = if lower.starts_with("https://") {
-        8
-    } else if lower.starts_with("http://") {
-        7
-    } else {
-        return None;
-    };
-    let host_end = url[scheme_len..].find(['/', '?', '#']).map_or(url.len(), |i| scheme_len + i);
-    (host_end > scheme_len).then(|| url[..host_end].to_string())
-}
-
-/// Distinct origins of the font bases, for `<link rel=preconnect>`.
-pub fn font_origins(settings: &Settings) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for origin in settings.font_bases().iter().filter_map(|b| url_origin(b)) {
-        if !out.contains(&origin) {
-            out.push(origin);
-        }
-    }
-    out
-}
-
-/// Injects the fallback web font and the CSS variables derived from settings,
-/// and marks the document as English, left-to-right (the UI is English-only).
+/// Injects the web fonts for Arabic outside the mushaf pages and the CSS
+/// variables derived from settings.
 #[component]
 pub fn FontLoader() -> Element {
     let settings = use_settings();
     let css = use_memo(move || css_variables(&settings.read()));
-    // Only the first base is preconnected: later ones are fallbacks.
-    let font_origin = use_memo(move || font_origins(&settings.read()).into_iter().next());
-
-    use_effect(move || {
-        let _ = document::eval("document.documentElement.lang = 'en'; document.documentElement.dir = 'ltr';");
-    });
-
     rsx! {
-        if let Some(origin) = font_origin() {
-            document::Link { key: "{origin}", rel: "preconnect", href: "{origin}", crossorigin: "anonymous" }
-        }
         document::Link { rel: "preconnect", href: "https://fonts.googleapis.com" }
         document::Link { rel: "preconnect", href: "https://fonts.gstatic.com", crossorigin: "anonymous" }
         document::Link { rel: "stylesheet", href: GOOGLE_FONTS_CSS }
         // A plain <style> element (unlike `document::Style`) updates reactively.
-        style { id: "quran-settings-vars", {css()} }
+        style { {css()} }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spacing_mapping() {
+        assert_eq!(word_gap(0), "0em");
+        assert_eq!(word_gap(DEFAULT_WORD_SPACING), "0.12em");
+        assert_eq!(word_gap(10), "0.6em");
+        assert_eq!(word_gap(99), "0.6em");
+        assert_eq!(line_gap(DEFAULT_LINE_SPACING), "0.4");
+        assert_eq!((line_gap(0), line_gap(10), line_gap(99)), ("0".into(), "1".into(), "1".into()));
+        assert_eq!(meaning_gap(DEFAULT_MEANING_SPACING), "0.12");
+        assert_eq!((meaning_gap(0), meaning_gap(2), meaning_gap(10)), ("-0.12".into(), "0".into(), "0.48".into()));
+        let css = css_variables(&Settings::default());
+        assert_eq!((content_width_px(0), content_width_px(3), content_width_px(99)), (960, 1440, 2560));
+        for var in ["--mushaf-word-gap: 0.12em;", "--mushaf-line-gap: 0.4;", "--mushaf-meaning-gap: 0.12;", "--content-width: 960px;"] {
+            assert!(css.contains(var), "{css}");
+        }
+    }
+
+    #[test]
+    fn theme_and_pointer_css() {
+        let mut s = Settings::default();
+        let css = css_variables(&s);
+        for var in ["--pointer-color: #ffffff;", "--pointer-size: 0.5;", "--pointer-opacity: 0.5;", "--pointer-blur: 0;", "--pointer-glow: 0;"] {
+            assert!(css.contains(var), "{css}");
+        }
+        assert!(!css.contains("color-scheme"), "Auto leaves the scheme to the system: {css}");
+        s.theme = Theme::Dark;
+        assert!(css_variables(&s).contains("color-scheme: dark;"));
+        s.theme = Theme::Sepia;
+        assert!(css_variables(&s).contains("color-scheme: light; --bg: #f4ecd8;"));
+        // A colour that isn't one never reaches the stylesheet.
+        s.pointer.color = "red; } body { display: none".into();
+        s.pointer.blur = 10;
+        let css = css_variables(&s);
+        assert!(css.contains("--pointer-color: #ffffff;") && css.contains("--pointer-blur: 0.3;"), "{css}");
+        assert!(!css.contains("display"), "{css}");
+        assert_eq!(sanitize_color(" #AbCdEf "), Some("#abcdef".into()));
+        assert_eq!((sanitize_color("#fff"), sanitize_color("abcdef"), sanitize_color("#12345g")), (None, None, None));
+    }
+
+    #[test]
+    fn custom_theme_derives_its_shades() {
+        let mut s = Settings { theme: Theme::Custom, ..Settings::default() };
+        assert_eq!(s.dark(), Some(true), "the default custom background is dark");
+        let css = css_variables(&s);
+        for part in ["color-scheme: dark;", "--bg: #101a2b;", "--fg: color-mix(in oklab, #101a2b 10%, white);", "--accent: #2ca4ab;", "--on-accent: #fff;"] {
+            assert!(css.contains(part), "{part} missing in {css}");
+        }
+        // A light background flips the text to dark; a light accent gets dark text on it.
+        s.custom_theme = CustomTheme { background: "#F3E9D2".into(), accent: "#ffd54a".into() };
+        assert_eq!(s.dark(), Some(false));
+        let css = css_variables(&s);
+        for part in ["color-scheme: light;", "--bg: #f3e9d2;", "10%, black);", "--on-accent: #111;", "--tip-bg: var(--fg);"] {
+            assert!(css.contains(part), "{part} missing in {css}");
+        }
+        // Bad colours fall back to the defaults instead of reaching the stylesheet.
+        s.custom_theme = CustomTheme { background: "url(x)".into(), accent: "} *{".into() };
+        let css = css_variables(&s);
+        assert!(css.contains("--bg: #101a2b;") && css.contains("--accent: #2ca4ab;") && !css.contains("url("), "{css}");
+        assert_eq!((luminance("#000000"), luminance("#ffffff")), (Some(0.0), Some(1.0)));
+        assert!(luminance("nope").is_none());
+        let themes = |t| Settings { theme: t, ..Settings::default() }.dark();
+        assert_eq!((themes(Theme::Auto), themes(Theme::Dark), themes(Theme::Sepia)), (None, Some(true), Some(false)));
+    }
 
     #[test]
     fn font_scale_mapping() {
@@ -373,29 +540,17 @@ mod tests {
         let css = css_variables(&s);
         assert!(css.contains("--arabic-size: 2.4rem;"), "{css}");
         assert!(css.contains("--translation-size: 1.05rem;"));
-        assert!(css.contains(r#"--arabic-font: "UthmanicHafs", "KFGQPC Uthmanic Script HAFS", "Amiri Quran", serif;"#));
-        // The legacy script choice no longer changes the font.
-        s.script = QuranScript::IndoPak;
         s.arabic_font_scale = 10;
-        let css = css_variables(&s);
-        assert!(!css.contains("Nastaliq"));
-        assert!(css.contains("--arabic-size: 4.4rem;"));
-        assert!(!GOOGLE_FONTS_CSS.contains("Nastaliq"));
+        assert!(css_variables(&s).contains("--arabic-size: 4.4rem;"));
     }
 
     #[test]
-    fn font_origins_for_preconnect() {
-        assert_eq!(url_origin("https://static.qurancdn.com/fonts/quran").as_deref(), Some("https://static.qurancdn.com"));
-        assert_eq!(url_origin("http://localhost:8080").as_deref(), Some("http://localhost:8080"));
-        assert_eq!(url_origin("HTTPS://X.org?q#f").as_deref(), Some("HTTPS://X.org"));
-        assert_eq!(url_origin("/fonts/quran"), None);
-        assert_eq!(url_origin("https://"), None);
+    fn custom_font_base_is_tried_first() {
         let mut s = Settings::default();
-        assert_eq!(font_origins(&s), ["https://static.qurancdn.com", "https://quran.com"]);
-        s.font_base_url = "https://quran.com/my-fonts".into();
-        assert_eq!(font_origins(&s), ["https://quran.com", "https://static.qurancdn.com"]);
-        s.font_base_url = "/fonts/quran".into();
-        assert_eq!(font_origins(&s)[0], "https://static.qurancdn.com");
+        assert_eq!(s.font_bases(), DEFAULT_FONT_BASES);
+        s.font_base_url = " /fonts/quran/ ".into();
+        assert_eq!(s.font_bases()[0], "/fonts/quran");
+        assert_eq!(s.font_bases().len(), DEFAULT_FONT_BASES.len() + 1);
     }
 
     #[test]
@@ -406,13 +561,5 @@ mod tests {
         for l in ["en", "id", "english", "French", "", "bangla", "turkish"] {
             assert!(!is_rtl_language(l), "{l}");
         }
-    }
-
-    #[test]
-    fn lang_tag_sanitized() {
-        assert_eq!(safe_lang_tag("ur"), "ur");
-        assert_eq!(safe_lang_tag("pt_BR"), "pt-BR");
-        assert_eq!(safe_lang_tag("x'; alert(1); '"), "en");
-        assert_eq!(safe_lang_tag(""), "en");
     }
 }

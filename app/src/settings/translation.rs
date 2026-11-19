@@ -1,5 +1,5 @@
 //! Verse translation text with safe footnotes, used for the per-page translations
-//! under the mushaf pages. (Word rendering lives in `reader::glyph`/`reader::mushaf_view`.)
+//! under the mushaf pages and the settings preview.
 
 use dioxus::prelude::*;
 use quran_api::Translation;
@@ -17,19 +17,19 @@ pub fn TranslationText(translation: Translation) -> Element {
     let uid = translation.id.unwrap_or(translation.resource_id);
 
     rsx! {
-        div { class: "translation", dir, "data-resource": "{translation.resource_id}",
-            p { class: "translation-text", {render_segments(&segments, Some((uid, open_note)))} }
-            if let Some(name) = translation.resource_name.as_ref().filter(|n| !n.is_empty()) {
-                p { class: "translation-source", "— {name}" }
-            }
-            if let Some(id) = open_note() {
-                FootNoteBox {
-                    key: "{id}",
-                    id,
-                    dom_id: format!("footnote-{uid}-{id}"),
-                    rtl: dir == "rtl",
-                    on_close: move |_| open_note.set(None),
-                }
+        p { class: "translation-text", dir, "data-resource": "{translation.resource_id}",
+            {render_segments(&segments, Some((uid, open_note)))}
+        }
+        if let Some(name) = translation.resource_name.as_ref().filter(|n| !n.is_empty()) {
+            p { class: "translation-source", dir, "— {name}" }
+        }
+        if let Some(id) = open_note() {
+            FootNoteBox {
+                key: "{id}",
+                id,
+                dom_id: format!("footnote-{uid}-{id}"),
+                rtl: dir == "rtl",
+                on_close: move |_| open_note.set(None),
             }
         }
     }
@@ -48,7 +48,7 @@ fn render_segment(i: usize, seg: Segment, footnotes: Option<(u32, Signal<Option<
             (true, true) => rsx! { em { key: "{i}", strong { "{text}" } } },
             (true, false) => rsx! { em { key: "{i}", "{text}" } },
             (false, true) => rsx! { strong { key: "{i}", "{text}" } },
-            (false, false) => rsx! { span { key: "{i}", "{text}" } },
+            (false, false) => rsx! { Fragment { key: "{i}", "{text}" } },
         },
         Segment::LineBreak => rsx! { br { key: "{i}" } },
         Segment::FootNote { id, label } => {
@@ -98,15 +98,12 @@ fn FootNoteBox(id: u32, dom_id: String, rtl: bool, on_close: EventHandler<()>) -
 
     rsx! {
         aside { class: "footnote-box", id: "{dom_id}", role: "note", aria_label: "Footnote",
-            div { class: "footnote-head",
-                span { class: "footnote-title", "Footnote" }
-                button {
-                    r#type: "button",
-                    class: "footnote-close",
-                    aria_label: "Close footnote",
-                    onclick: move |_| on_close.call(()),
-                    "×"
-                }
+            button {
+                r#type: "button",
+                class: "footnote-close",
+                aria_label: "Close footnote",
+                onclick: move |_| on_close.call(()),
+                "×"
             }
             {body}
         }

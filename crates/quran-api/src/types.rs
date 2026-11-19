@@ -130,6 +130,10 @@ pub struct Verse {
     pub text_indopak: Option<String>,
     #[serde(default)]
     pub text_imlaei: Option<String>,
+    /// KFGQPC Hafs Unicode text of the whole verse, ending in NBSP + the ayah number
+    /// (the API has this per verse only, not per word).
+    #[serde(default)]
+    pub qpc_uthmani_hafs: Option<String>,
     #[serde(default)]
     pub words: Vec<Word>,
     #[serde(default)]
