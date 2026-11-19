@@ -279,11 +279,14 @@ const alphaOf = (ctx, font, text) => {
   ctx.fillText(text, 48, 40);
   return ctx.getImageData(0, 0, 96, 80).data;
 };
-const drawn = (ctx, family, text, px) => {
+// `blankOk`: a glyph that draws nothing and takes no room counts as drawn. The
+// tajweed fonts have such glyphs (the second glyph of الٓر at 10:1, for one); a
+// character the font lacks is drawn by a fallback font instead, with ink and width.
+const drawn = (ctx, family, text, px, blankOk) => {
   const a = alphaOf(ctx, `${px}px "${family}", serif`, text);
   let ink = false;
   for (let i = 3; i < a.length; i += 4) if (a[i] !== 0) { ink = true; break; }
-  if (!ink) return false;
+  if (!ink) return !!blankOk && ctx.measureText(text).width === 0;
   const b = alphaOf(ctx, `${px}px serif`, text);
   for (let i = 3; i < a.length; i += 4) if (a[i] !== b[i]) return true;
   return false;
@@ -292,7 +295,7 @@ const painted = (family, chars) => {
   const ctx = probeCtx();
   if (!ctx || !chars) return true;
   try {
-    for (const ch of chars) if (ch.trim() && !drawn(ctx, family, ch, 32)) return false;
+    for (const ch of chars) if (ch.trim() && !drawn(ctx, family, ch, 32, true)) return false;
     return true;
   } catch (_) { return true; }
 };

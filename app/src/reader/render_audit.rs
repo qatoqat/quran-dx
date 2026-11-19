@@ -89,7 +89,8 @@ if (!window.__mushafFit) {
     for (const el of boxes()) {
       const size = sizes.get(el);
       if (!size || !(size.room > 0) || !(size.natural > 0)) continue;
-      fit = Math.min(fit, Math.floor(size.room / size.natural * 1000) / 1000);
+      // One pixel to spare: engines round glyph and font sizes.
+      fit = Math.min(fit, Math.floor((size.room - 1) / size.natural * 1000) / 1000);
       natural = Math.max(natural, size.natural);
     }
     fit = Math.max(0.2, fit);
@@ -152,6 +153,22 @@ if (!root) return null;
 // placeholder (`content-visibility: auto`) whose box does not match its words yet.
 const lines = root.querySelector(".mushaf-lines");
 if (lines && lines.checkVisibility && !lines.checkVisibility({{ contentVisibilityAuto: true }})) return "later";
+// A line that sticks out of its page right now may only be waiting for a font or
+// for the fit to settle: fit everything again and look once more, a few times,
+// before any word is reported as cut off.
+if (lines) {{
+  const box = root.getBoundingClientRect();
+  const sticksOut = [...lines.querySelectorAll(":scope > .mushaf-line")].some((l) => {{
+    const first = l.firstElementChild, last = l.lastElementChild;
+    return first && (first.getBoundingClientRect().right > box.right + 1 || last.getBoundingClientRect().left < box.left - 1);
+  }});
+  const tries = Number(root.dataset.refits || 0);
+  if (sticksOut && tries < 6) {{
+    root.dataset.refits = String(tries + 1);
+    window.__mushafFit.all();
+    return "later";
+  }}
+}}
 const expected = {exp};
 const out = [];
 const els = new Map();
@@ -209,7 +226,16 @@ for (const e of expected) {{
   if (parseFloat(cs.fontSize) < 4) {{ out.push([e.loc, "text too small"]); continue; }}
   range.selectNodeContents(node);
   const r = range.getBoundingClientRect();
-  if (r.width < 1 || r.height < 1) {{ out.push([e.loc, "zero size"]); continue; }}
+  // A glyph may take no room and still be drawn: a pause mark the font places on
+  // the word before it (the API gives 40:77:5 only such a mark). It must have ink.
+  const mark = () => {{
+    if (!e.family) return false;
+    const ctx = (window.__auditInk ??= document.createElement("canvas").getContext("2d"));
+    ctx.font = `32px "${{e.family}}"`;
+    const m = ctx.measureText(text);
+    return m.actualBoundingBoxLeft + m.actualBoundingBoxRight > 0.5 && m.actualBoundingBoxAscent + m.actualBoundingBoxDescent > 0.5;
+  }};
+  if (r.height < 1 || (r.width < 1 && !mark())) {{ out.push([e.loc, "zero size"]); continue; }}
   const cut = cutOff(el);
   if (cut) {{ out.push([e.loc, cut]); continue; }}
   if (e.family && !document.fonts.check(`16px "${{e.family}}"`, text)) {{ out.push([e.loc, "font not loaded"]); continue; }}

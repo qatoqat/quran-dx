@@ -211,7 +211,10 @@ async function rendered(page) {
           for (let i = 3; i < a.length; i += 4) if (a[i] !== 0) { ink = true; break; }
           let same = true;
           if (ink) { const b = draw("48px serif", ch); for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { same = false; break; } }
-          coverCache.set(k, ink && !same);
+          // The tajweed fonts have a few glyphs that draw nothing and take no room
+          // (after الٓر at 10:1, for one); a missing glyph would get a fallback's box.
+          const blank = !ink && ctx.measureText(ch).width === 0;
+          coverCache.set(k, (ink && !same) || blank);
         }
         if (!coverCache.get(k)) return false;
       }
