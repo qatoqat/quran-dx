@@ -7,9 +7,12 @@ cd "$(dirname "$0")/.."
 export RUSTUP_TOOLCHAIN=stable
 export CARGO_BUILD_JOBS=2
 cmd="${1:-check}"; shift || true
+# Default to the whole workspace unless a package is selected.
+scope=(--workspace)
+for a in "$@"; do [[ "$a" == "-p" || "$a" == --package* ]] && scope=(); done
 case "$cmd" in
-  check)  cargo check --ignore-rust-version --workspace "$@" ;;
-  test)   cargo test  --ignore-rust-version --workspace "$@" ;;
-  clippy) cargo clippy --ignore-rust-version --workspace --all-targets "$@" -- -D warnings ;;
+  check)  cargo check --ignore-rust-version "${scope[@]}" "$@" ;;
+  test)   cargo test  --ignore-rust-version "${scope[@]}" "$@" ;;
+  clippy) cargo clippy --ignore-rust-version "${scope[@]}" --all-targets "$@" -- -D warnings ;;
   *)      cargo "$cmd" --ignore-rust-version "$@" ;;
 esac
