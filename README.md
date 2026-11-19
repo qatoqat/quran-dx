@@ -57,6 +57,29 @@ cargo test -p quran-api -- --ignored            # live tests against api.quran.c
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+## Checking that no word is missing
+
+The app checks itself as it loads: each verse must have contiguous word positions ending
+in its ayah marker, every word must have text, and no verse in a range may be skipped. If a
+verse's word data is incomplete, the full verse text is shown instead and a warning banner
+names the verse. Words never render empty; a visible `⟨?⟩` marks text the API didn't send.
+
+Two checks need the real API, so they run on your machine:
+
+```bash
+# 1. Data: all 6,236 verses / every word from the API (~190 requests, a few minutes)
+cargo test -p quran-api --test live_integrity -- --ignored --nocapture
+
+# 2. Screen: what the web app actually renders vs. the API, for all 114 surahs
+cd app && dx serve --platform web          # in one terminal
+cd tools/word-check && npm install && npx playwright install chromium
+node check-words.mjs                        # or --chapters 1-10,18 for a subset
+```
+
+The browser check compares, verse by verse, the rendered Arabic words with the API's
+`text_uthmani` words (count and text, in order) and flags missing, duplicated or fallback
+verses. It writes `report.json` and exits non-zero on any problem.
+
 ## Layout
 
 ```
@@ -66,6 +89,7 @@ app/src/reader/     surah list, chapter/range/page/juz views, verse rendering
 app/src/settings/   settings state, persistence, settings page, word-by-word, footnotes
 app/src/search/     search box, shortcut parser, results page
 app/assets/         CSS
+tools/word-check/   browser test: rendered words vs. API
 ```
 
 ## Notes

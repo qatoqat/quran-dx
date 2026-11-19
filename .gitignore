@@ -1,2 +1,4 @@
 /target
 /app/dist
+node_modules/
+tools/word-check/report.json
