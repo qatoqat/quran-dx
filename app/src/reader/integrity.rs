@@ -350,6 +350,18 @@ pub fn word_layout(word: &Word) -> Option<(u16, u16)> {
     }
 }
 
+/// Where a word sits, given where the word before it in the verse sits: its own
+/// `(page, line)`. An `end` marker that has none, or whose own lies *before* the
+/// word it follows (the API has 84:21's marker one line early), sits with that word.
+pub fn slot_after(prev: Option<(u16, u16)>, word: &Word) -> Option<(u16, u16)> {
+    match (word_layout(word), prev) {
+        (Some(own), Some(prev)) if word.is_end_marker() && own < prev => Some(prev),
+        (Some(own), _) => Some(own),
+        (None, prev) if word.is_end_marker() => prev,
+        (None, _) => None,
+    }
+}
+
 /// Whether every non-end word of a verse has valid line data, so the verse can
 /// be placed on its mushaf lines. (A missing `end` marker position is tolerated:
 /// it joins the line of the word before it.)
@@ -395,8 +407,10 @@ pub fn layout_issues(verses: &[Verse]) -> Vec<IntegrityIssue> {
         if !placeable {
             continue;
         }
+        let mut prev = None;
         for w in &v.words {
-            let Some((page, line)) = word_layout(w) else { continue };
+            let Some((page, line)) = slot_after(prev, w) else { continue };
+            prev = Some((page, line));
             if last == Some((page, line)) {
                 continue;
             }

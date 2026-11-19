@@ -9,7 +9,7 @@ use std::rc::Rc;
 use quran_api::{Verse, Word};
 
 use super::glyph;
-use super::integrity::{self, word_layout};
+use super::integrity;
 
 /// One drawable word (or ayah-end marker) with everything the renderer needs.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -212,17 +212,13 @@ fn word_cell(v: &Verse, w: &Word, layout: Option<(u16, u16)>, qpc: Option<&str>)
     }
 }
 
-/// `(page, line)` per word: its own, or for an `end` marker without line data,
-/// the previous word's. `None` if any word can't be placed.
+/// `(page, line)` per word (see [`integrity::slot_after`]: an `end` marker without
+/// line data, or with a line before its verse's last word, joins that word).
+/// `None` if any word can't be placed.
 fn resolve_layout(v: &Verse) -> Option<Vec<(u16, u16)>> {
     let mut out: Vec<(u16, u16)> = Vec::with_capacity(v.words.len());
     for w in &v.words {
-        let slot = match word_layout(w) {
-            Some(s) => s,
-            None if w.is_end_marker() => *out.last()?,
-            None => return None,
-        };
-        out.push(slot);
+        out.push(integrity::slot_after(out.last().copied(), w)?);
     }
     Some(out)
 }
@@ -525,6 +521,15 @@ mod tests {
         v.words[2].page_number = None;
         let l = build_layout(&[v], Trim::default());
         assert_eq!(kinds(&l.pages[0]), ["L5x1", "L6x2"]);
+    }
+
+    #[test]
+    fn end_marker_on_an_earlier_line_joins_its_verse() {
+        // As the API has it for 84:21: words on lines 13 and 14, the marker back on 13.
+        let v = verse("84:21", &[(589, 13), (589, 14), (589, 14), (589, 13)]);
+        assert!(integrity::layout_issues(std::slice::from_ref(&v)).is_empty(), "not a layout problem");
+        let l = build_layout(&[v], Trim::default());
+        assert_eq!(kinds(&l.pages[0]), ["L13x1", "L14x3"]);
     }
 
     #[test]
