@@ -484,3 +484,21 @@ fn missing_required_field_is_an_error() {
     let err = serde_json::from_str::<Verse>(r#"{"id": 1, "verse_number": 1}"#).unwrap_err();
     assert!(err.to_string().contains("verse_key"), "{err}");
 }
+
+/// Regression: the API repeats `line_number`/`page_number` in a word when they are
+/// also requested via `word_fields`; that must not fail the whole response.
+#[test]
+fn duplicate_keys_from_the_api_are_tolerated() {
+    let body = r#"{"verses":[{"id":2,"verse_number":1,"verse_key":"107:1","page_number":602,"page_number":602,
+        "words":[{"id":1,"position":1,"char_type_name":"word","line_number":3,"page_number":602,
+                  "code_v2":"\uFB51","line_number":3,"page_number":602,"v2_page":602},
+                 {"id":2,"position":2,"char_type_name":"end","line_number":3,"line_number":3}]}],
+        "pagination":{"per_page":50,"current_page":1,"next_page":null,"total_pages":1,"total_records":7}}"#;
+    // Strict derive would fail…
+    assert!(serde_json::from_str::<VersesResponse>(body).is_err());
+    // …the client's parser keeps the (identical) last value.
+    let r: VersesResponse = quran_api::parse_json(body).expect("duplicate keys must be tolerated");
+    let w = &r.verses[0].words[0];
+    assert_eq!((w.page_number, w.line_number, w.v2_page), (Some(602), Some(3), Some(602)));
+    assert_eq!(r.verses[0].words[1].line_number, Some(3));
+}

@@ -71,7 +71,7 @@ impl Client {
         if !status.is_success() {
             return Err(Error::Status { status: status.as_u16(), body: truncate(&body, 300) });
         }
-        Ok(serde_json::from_str(&body)?)
+        parse_json(&body)
     }
 
     /// All 114 chapters, names translated into `language`.
@@ -142,6 +142,16 @@ impl Client {
             .await?;
         Ok(r.search)
     }
+}
+
+/// Parse an API response body. The API repeats some keys in an object when a
+/// field it sends by default is also requested explicitly (e.g. `line_number` in
+/// `word_fields`), and derived serde types reject duplicate fields. Going through
+/// `serde_json::Value` first keeps the last value of a repeated key, as browsers'
+/// `JSON.parse` does, so such responses still load.
+pub fn parse_json<T: DeserializeOwned>(body: &str) -> Result<T> {
+    let value: serde_json::Value = serde_json::from_str(body)?;
+    Ok(serde_json::from_value(value)?)
 }
 
 /// On native targets give every request a deadline so a hung connection turns into

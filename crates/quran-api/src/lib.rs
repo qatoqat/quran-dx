@@ -7,7 +7,7 @@ pub mod client;
 pub mod query;
 pub mod types;
 
-pub use client::{Client, Error};
+pub use client::{Client, Error, parse_json};
 pub use query::VerseQuery;
 pub use types::*;
 
