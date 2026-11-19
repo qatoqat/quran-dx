@@ -9,6 +9,11 @@
 //   - each word shows the right text: the QCF glyph (`code_v2`) when its page font
 //     loaded, otherwise the Unicode fallback (`qpc_uthmani_hafs`/`text_uthmani`)
 //   - each word sits on the API's mushaf page and line (15-line layout)
+//   - glyph words use their own page's QCF font, and that font really contains
+//     the glyph (canvas check: inked, and different from a system-font letter)
+//   - exactly one ayah marker per verse, after its last word, with the right glyph
+//   - each surah header (and Bismillah, except surahs 1 and 9) sits directly
+//     before that surah's first word
 //   - no `⟨?⟩` placeholders; words shown as Unicode fallback are reported
 //     separately (fonts not loading is a problem, but no word is lost)
 //
@@ -73,6 +78,9 @@ async function apiGet(path, params = {}) {
   }
 }
 
+/** verse_key -> the end marker's glyph (filled by expectedWords). */
+const ENDS = new Map();
+
 /**
  * verse_key -> expected non-end words for an API listing:
  * [{ location, glyph, text, page, line }]
@@ -87,6 +95,8 @@ async function expectedWords(apiPath, keep = () => true) {
     if (!data.pagination) throw new Error(`no pagination in ${apiPath} page ${page}`);
     for (const v of data.verses) {
       if (!keep(v)) continue;
+      const end = v.words.find((w) => w.char_type_name === "end");
+      ENDS.set(v.verse_key, norm(end?.code_v2 ?? ""));
       out.set(v.verse_key, v.words.filter((w) => w.char_type_name !== "end").map((w) => ({
         location: w.location ?? `${v.verse_key}:${w.position}`,
         glyph: norm(w.code_v2 ?? ""),
@@ -125,23 +135,85 @@ async function loadAll(page, expectedCount) {
   }
 }
 
-/** What the page actually shows: verse anchors and every rendered word. */
+/** What the page actually shows: verse anchors, words, markers, headers. */
 async function rendered(page) {
-  return page.evaluate(() => {
+  return page.evaluate(async () => {
+    // Same independent coverage test the app uses: the glyph must ink, and must
+    // differ from the same character in plain serif (i.e. no substitution).
+    const canvas = document.createElement("canvas");
+    canvas.width = 160; canvas.height = 120;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const draw = (font, ch) => {
+      ctx.clearRect(0, 0, 160, 120);
+      ctx.font = font; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = "#000";
+      ctx.fillText(ch, 80, 60);
+      return ctx.getImageData(0, 0, 160, 120).data;
+    };
+    const coverCache = new Map();
+    const covers = (family, text) => {
+      for (const ch of text) {
+        if (!ch.trim()) continue;
+        const k = family + "|" + ch;
+        if (!coverCache.has(k)) {
+          const a = draw(`48px "${family}", serif`, ch);
+          let ink = false;
+          for (let i = 3; i < a.length; i += 4) if (a[i] !== 0) { ink = true; break; }
+          let same = true;
+          if (ink) { const b = draw("48px serif", ch); for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { same = false; break; } }
+          coverCache.set(k, ink && !same);
+        }
+        if (!coverCache.get(k)) return false;
+      }
+      return true;
+    };
+    const firstFamily = (el) => getComputedStyle(el).fontFamily.split(",")[0].trim().replace(/^["']|["']$/g, "");
+
     const anchors = [...document.querySelectorAll(".verse-anchor[data-verse-key]")].map((a) => ({
       key: a.dataset.verseKey,
       declared: Number(a.dataset.wordCount),
     }));
-    const words = [...document.querySelectorAll(".word[data-location]")].map((w) => ({
-      location: w.dataset.location,
-      mode: w.dataset.mode,
-      page: w.dataset.page ? Number(w.dataset.page) : null,
-      line: w.dataset.line ? Number(w.dataset.line) : null,
-      text: (w.querySelector(".word-text") ?? w).textContent,
-      missing: w.classList.contains("word-missing"),
-    }));
+    // Document order of everything we check positions of.
+    const ordered = [...document.querySelectorAll(".word[data-location], .ayah-marker[data-verse-key], .surah-header-line[data-chapter], .bismillah-line")];
+    const index = new Map(ordered.map((el, i) => [el, i]));
+    const words = [...document.querySelectorAll(".word[data-location]")].map((w) => {
+      const t = w.querySelector(".word-text") ?? w;
+      const text = t.textContent;
+      const family = w.dataset.mode === "glyph" ? firstFamily(t.querySelector(".glyph-text") ?? t) : null;
+      return {
+        location: w.dataset.location,
+        mode: w.dataset.mode,
+        page: w.dataset.page ? Number(w.dataset.page) : null,
+        line: w.dataset.line ? Number(w.dataset.line) : null,
+        text,
+        family,
+        covered: family ? covers(family, text.trim()) : null,
+        order: index.get(w),
+      };
+    });
+    const markers = [...document.querySelectorAll(".ayah-marker[data-verse-key]")].map((m) => {
+      const glyphEl = m.querySelector(".glyph-text");
+      const text = (glyphEl ?? m.querySelector(".word-text") ?? m).textContent;
+      const family = m.dataset.mode === "glyph" ? firstFamily(glyphEl ?? m) : null;
+      return {
+        key: m.dataset.verseKey,
+        mode: m.dataset.mode,
+        page: m.dataset.page ? Number(m.dataset.page) : null,
+        text: glyphEl ? glyphEl.textContent : null,
+        family,
+        covered: family && glyphEl ? covers(family, glyphEl.textContent.trim()) : null,
+        order: index.get(m),
+      };
+    });
+    const headers = [...document.querySelectorAll(".surah-header-line[data-chapter]")].map((h) => {
+      // The next checked element after the header, skipping a Bismillah line.
+      let i = index.get(h) + 1;
+      const bismillah = ordered[i]?.classList.contains("bismillah-line") ?? false;
+      if (bismillah) i++;
+      const next = ordered[i];
+      return { chapter: Number(h.dataset.chapter), bismillah, next: next?.dataset?.location ?? null };
+    });
     const missingPlaceholders = document.querySelectorAll(".word-missing").length;
-    return { anchors, words, missingPlaceholders };
+    return { anchors, words, markers, headers, missingPlaceholders };
   });
 }
 
@@ -156,7 +228,8 @@ async function checkView(page, view) {
   // Give page fonts a moment so glyph mode can kick in before we read the DOM.
   await page.evaluate(() => document.fonts.ready).catch(() => {});
   await sleep(500);
-  const { anchors, words, missingPlaceholders } = await rendered(page);
+  const { anchors, words, markers, headers, missingPlaceholders } = await rendered(page);
+  const familyFor = (p) => (FONT === "plain" ? `p${p}-v2` : `p${p}-v4`);
 
   if (await page.locator(".integrity-banner").count()) {
     problems.push({ at, kind: "integrity-banner", detail: (await page.locator(".integrity-banner").first().innerText()).slice(0, 300) });
@@ -194,6 +267,8 @@ async function checkView(page, view) {
       const text = norm(g.text);
       if (g.mode === "glyph") {
         if (text !== e.glyph) problems.push({ at, key, kind: "glyph", detail: `${e.location}: rendered ${JSON.stringify(text)}, expected ${JSON.stringify(e.glyph)}` });
+        if (e.page != null && g.family !== familyFor(e.page)) problems.push({ at, key, kind: "glyph-font", detail: `${e.location}: drawn in "${g.family}", expected "${familyFor(e.page)}"` });
+        if (g.covered === false) problems.push({ at, key, kind: "glyph-not-in-font", detail: `${e.location}: font "${g.family}" lacks this glyph; the browser drew a substitute` });
       } else {
         fallbackWords++;
         if (text !== e.text && text !== e.alt) problems.push({ at, key, kind: "word-text", detail: `${e.location}: rendered "${text}", expected "${e.text}"` });
@@ -202,6 +277,41 @@ async function checkView(page, view) {
       if (e.line != null && g.line !== e.line) problems.push({ at, key, kind: "line", detail: `${e.location}: on line ${g.line}, API ${e.line}` });
     }
   }
+  // Ayah markers: one per verse, after its last word, right glyph and font.
+  const markersByKey = new Map();
+  for (const m of markers) {
+    if (!markersByKey.has(m.key)) markersByKey.set(m.key, []);
+    markersByKey.get(m.key).push(m);
+  }
+  for (const key of expected.keys()) {
+    const ms = markersByKey.get(key) ?? [];
+    if (ms.length !== 1) { problems.push({ at, key, kind: "ayah-marker-count", detail: `${ms.length} markers` }); continue; }
+    const m = ms[0];
+    const got = byVerse.get(key) ?? [];
+    const last = got[got.length - 1];
+    if (last && !(m.order > last.order)) problems.push({ at, key, kind: "ayah-marker-position", detail: "marker is not after the verse's last word" });
+    if (m.mode === "glyph") {
+      const exp = ENDS.get(key) ?? "";
+      if (norm(m.text ?? "") !== exp) problems.push({ at, key, kind: "ayah-marker-glyph", detail: `rendered ${JSON.stringify(m.text)}, expected ${JSON.stringify(exp)}` });
+      if (m.page != null && m.family !== familyFor(m.page)) problems.push({ at, key, kind: "ayah-marker-font", detail: `"${m.family}" vs "${familyFor(m.page)}"` });
+      if (m.covered === false) problems.push({ at, key, kind: "ayah-marker-not-in-font" });
+    }
+  }
+  for (const key of markersByKey.keys()) if (!expected.has(key)) problems.push({ at, key, kind: "unexpected-ayah-marker" });
+
+  // Surah headers: exactly for the surahs whose verse 1 is shown, directly before
+  // X:1:1, with a Bismillah line except for surahs 1 and 9.
+  const startsHere = [...expected.keys()].filter((k) => k.endsWith(":1")).map((k) => Number(k.split(":")[0]));
+  for (const c of startsHere) {
+    const hs = headers.filter((h) => h.chapter === c);
+    if (hs.length !== 1) { problems.push({ at, kind: "surah-header-count", detail: `surah ${c}: ${hs.length} headers` }); continue; }
+    const h = hs[0];
+    if (h.next !== `${c}:1:1`) problems.push({ at, kind: "surah-header-position", detail: `surah ${c}: header is followed by ${h.next}, expected ${c}:1:1` });
+    const wantBismillah = c !== 1 && c !== 9;
+    if (h.bismillah !== wantBismillah) problems.push({ at, kind: "bismillah", detail: `surah ${c}: bismillah ${h.bismillah ? "present" : "missing"}` });
+  }
+  for (const h of headers) if (!startsHere.includes(h.chapter)) problems.push({ at, kind: "unexpected-surah-header", detail: `surah ${h.chapter}` });
+
   if (fallbackWords && !ALLOW_FALLBACK) {
     problems.push({ at, kind: "font-fallback", detail: `${fallbackWords} word(s) shown as Unicode text because the page font did not load (no words lost)` });
   }

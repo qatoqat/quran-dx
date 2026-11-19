@@ -5,9 +5,13 @@
 //! `Settings::font_bases()` in order. Per-page state lives in [`FONTS`]; words
 //! switch from Unicode text to glyphs only when their page is `Loaded`.
 //!
-//! After loading, a tiny canvas probe draws one glyph of the page: if nothing is
-//! painted (e.g. a webview without COLRv1 colour-font support), the page is
-//! marked `Failed` so words stay readable as Unicode text instead of blank.
+//! After loading, a canvas probe checks EVERY glyph character used on the page:
+//! each must paint something (catches webviews without COLRv1 colour-font
+//! support) and must look different from the same character in the system serif
+//! font (catches a font file that lacks a glyph, where the browser would silently
+//! draw a system letter instead). Glyphs that arrive later for an already-loaded
+//! page (more verses loaded) are probed too. Any failure marks the page `Failed`,
+//! so its words stay readable as Unicode text — never blank, never wrong.
 //!
 //! Desktop (`native-fonts` feature, non-wasm): the font bytes are downloaded with
 //! reqwest and handed to `new FontFace(name, bytes)`, which avoids cross-origin
@@ -37,7 +41,11 @@ pub struct FontRegistry {
     bases: Vec<String>,
     /// Keyed by `(MushafFont::mushaf_id(), page)`.
     pages: HashMap<(u32, u16), FontStatus>,
+    /// Glyph characters already verified for a loaded page.
+    verified: HashMap<(u32, u16), String>,
     fallback: Option<FontStatus>,
+    /// Bumped when the bases change; results of loads started earlier are dropped.
+    generation: u64,
 }
 
 impl FontRegistry {
@@ -70,11 +78,37 @@ impl FontRegistry {
         out
     }
 
-    /// New base URLs: failed loads get another chance with them.
+    /// New base URLs: failed and in-flight loads start over with them (in-flight
+    /// results from the old bases are dropped via `generation`).
     fn sync_bases(&mut self, bases: &[String]) {
         if self.bases != bases {
             self.bases = bases.to_vec();
-            self.forget_failed();
+            self.generation += 1;
+            self.pages.retain(|_, s| *s == FontStatus::Loaded);
+            if self.fallback != Some(FontStatus::Loaded) {
+                self.fallback = None;
+            }
+        }
+    }
+
+    /// Characters of `glyphs` not yet verified for a loaded page (deduplicated).
+    fn unverified(&self, key: (u32, u16), glyphs: &str) -> String {
+        let done = self.verified.get(&key).map(String::as_str).unwrap_or("");
+        let mut out = String::new();
+        for c in glyphs.chars().filter(|c| !c.is_whitespace()) {
+            if !done.contains(c) && !out.contains(c) {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn mark_verified(&mut self, key: (u32, u16), chars: &str) {
+        let entry = self.verified.entry(key).or_default();
+        for c in chars.chars() {
+            if !entry.contains(c) {
+                entry.push(c);
+            }
         }
     }
 
@@ -145,24 +179,44 @@ fn js_string(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
 }
 
-/// Shared JS: draw `probe` in `family` on a canvas; true if anything was painted
-/// (or if the probe can't run at all, so a working font is never rejected).
+/// Shared JS: `painted(family, chars)` is true when every character of `chars`,
+/// drawn in `family` (with a serif fallback), (a) paints something and (b) differs
+/// from the same character drawn in plain serif, i.e. the face really has the
+/// glyph and the browser didn't substitute a system letter. If the canvas can't
+/// be used at all the check can't run and it returns true (quran.com likewise
+/// trusts a loaded face).
 const PROBE_JS: &str = r##"
-const painted = (family, probe) => {
-  if (!probe) return true;
+const painted = (family, chars) => {
+  if (!chars) return true;
+  let ctx;
   try {
     const c = document.createElement("canvas");
     c.width = 160; c.height = 120;
-    const ctx = c.getContext("2d");
-    if (!ctx) return true;
-    ctx.font = `64px "${family}"`;
+    ctx = c.getContext("2d", { willReadFrequently: true });
+  } catch (_) { return true; }
+  if (!ctx) return true;
+  const draw = (font, ch) => {
+    ctx.clearRect(0, 0, 160, 120);
+    ctx.font = font;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillStyle = "#000";
-    ctx.fillText(probe, 80, 60);
-    const data = ctx.getImageData(0, 0, c.width, c.height).data;
-    for (let i = 3; i < data.length; i += 4) if (data[i] !== 0) return true;
-    return false;
+    ctx.fillText(ch, 80, 60);
+    return ctx.getImageData(0, 0, 160, 120).data;
+  };
+  try {
+    for (const ch of chars) {
+      if (!ch.trim()) continue;
+      const a = draw(`48px "${family}", serif`, ch);
+      let ink = false;
+      for (let i = 3; i < a.length; i += 4) if (a[i] !== 0) { ink = true; break; }
+      if (!ink) return false;
+      const b = draw("48px serif", ch);
+      let same = true;
+      for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { same = false; break; }
+      if (same) return false;
+    }
+    return true;
   } catch (_) { return true; }
 };
 "##;
@@ -171,12 +225,17 @@ const painted = (family, probe) => {
 /// loaded and paints `probe`.
 pub fn url_load_js(family: &str, src: &str, display: &str, probe: &str) -> String {
     format!(
-        "{PROBE_JS}\nconst family = {};\ntry {{\n  const face = new FontFace(family, {}, {{ display: {} }});\n  document.fonts.add(face);\n  await face.load();\n  return painted(family, {});\n}} catch (_) {{ return false; }}",
+        "{PROBE_JS}\nconst family = {};\nlet face = null;\ntry {{\n  face = new FontFace(family, {}, {{ display: {} }});\n  document.fonts.add(face);\n  await face.load();\n  if (painted(family, {})) return true;\n}} catch (_) {{}}\nif (face) {{ try {{ document.fonts.delete(face); }} catch (_) {{}} }}\nreturn false;",
         js_string(family),
         js_string(src),
         js_string(display),
         js_string(probe),
     )
+}
+
+/// JS that checks more glyph characters against an already-loaded `family`.
+pub fn probe_js(family: &str, chars: &str) -> String {
+    format!("{PROBE_JS}\nreturn painted({}, {});", js_string(family), js_string(chars))
 }
 
 /// Load one face via URLs. Errors (including "no JS runtime", as in tests) → false.
@@ -194,28 +253,48 @@ mod native {
 
     use super::{PROBE_JS, js_string};
 
+    /// Largest font file accepted (QCF page fonts are well under 1 MB).
+    const MAX_FONT_BYTES: usize = 8 * 1024 * 1024;
+
     pub(super) async fn load(family: &str, urls: &[String], display: &str, probe: &str) -> bool {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        // Try every base until one gives a font the webview accepts and that passes
+        // the glyph probe (a base may answer 200 with an HTML page, or a bad file).
         for url in urls {
             let Ok(resp) = client.get(url).send().await else { continue };
             if !resp.status().is_success() {
                 continue;
             }
+            if resp.content_length().is_some_and(|n| n > MAX_FONT_BYTES as u64) {
+                continue;
+            }
             let Ok(bytes) = resp.bytes().await else { continue };
-            if bytes.is_empty() {
+            if !super::looks_like_font(&bytes) || bytes.len() > MAX_FONT_BYTES {
                 continue;
             }
             let js = format!(
-                "{PROBE_JS}\nconst family = {};\ntry {{\n  const bin = atob({});\n  const buf = new Uint8Array(bin.length);\n  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);\n  const face = new FontFace(family, buf.buffer, {{ display: {} }});\n  document.fonts.add(face);\n  await face.load();\n  return painted(family, {});\n}} catch (_) {{ return false; }}",
+                "{PROBE_JS}\nconst family = {};\nlet face = null;\ntry {{\n  const bin = atob({});\n  const buf = new Uint8Array(bin.length);\n  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);\n  face = new FontFace(family, buf.buffer, {{ display: {} }});\n  document.fonts.add(face);\n  await face.load();\n  if (painted(family, {})) return true;\n}} catch (_) {{}}\nif (face) {{ try {{ document.fonts.delete(face); }} catch (_) {{}} }}\nreturn false;",
                 js_string(family),
                 js_string(&super::base64(&bytes)),
                 js_string(display),
                 js_string(probe),
             );
-            return dioxus::prelude::document::eval(&js).join::<bool>().await.unwrap_or(false);
+            if dioxus::prelude::document::eval(&js).join::<bool>().await.unwrap_or(false) {
+                return true;
+            }
         }
         false
     }
+}
+
+/// WOFF2 / WOFF / TrueType / OpenType file signature check.
+#[cfg_attr(not(all(feature = "native-fonts", not(target_arch = "wasm32"))), allow(dead_code))]
+pub fn looks_like_font(bytes: &[u8]) -> bool {
+    matches!(bytes.get(..4), Some(b"wOF2" | b"wOFF" | b"OTTO" | b"true" | [0, 1, 0, 0]))
 }
 
 /// Standard base64 (with padding).
@@ -255,17 +334,28 @@ pub(crate) fn use_mushaf_fonts(pages: Memo<Vec<(u16, String)>>) {
             (s.mushaf_font, s.font_bases())
         };
         let pages = pages.read().clone();
-        let (todo, fallback) = {
+        let (todo, fallback, recheck, generation) = {
             let mut reg = FONTS.write();
             reg.sync_bases(&bases);
             let wanted: Vec<u16> = pages.iter().map(|(p, _)| *p).collect();
-            (reg.claim(font, &wanted), reg.claim_fallback())
+            let todo = reg.claim(font, &wanted);
+            // Loaded pages that now show glyph characters not yet probed.
+            let recheck: Vec<(u16, String)> = pages
+                .iter()
+                .filter(|(p, _)| reg.is_loaded(font, *p))
+                .map(|(p, g)| (*p, reg.unverified((font.mushaf_id(), *p), g)))
+                .filter(|(_, chars)| !chars.is_empty())
+                .collect();
+            (todo, reg.claim_fallback(), recheck, reg.generation)
         };
+        let current = move || FONTS.peek().generation == generation;
         if fallback {
             let urls = font_urls(&bases, FALLBACK_PATH);
             dioxus::dioxus_core::spawn_forever(async move {
                 let ok = load_face(FALLBACK_FACE.to_string(), urls, "swap", String::new()).await;
-                FONTS.write().fallback = Some(if ok { FontStatus::Loaded } else { FontStatus::Failed });
+                if current() {
+                    FONTS.write().fallback = Some(if ok { FontStatus::Loaded } else { FontStatus::Failed });
+                }
             });
         }
         for page in todo {
@@ -273,24 +363,42 @@ pub(crate) fn use_mushaf_fonts(pages: Memo<Vec<(u16, String)>>) {
             let urls = font_urls(&bases, &font.font_path(page));
             let family = font.family(page);
             dioxus::dioxus_core::spawn_forever(async move {
-                let ok = load_face(family, urls, "block", probe).await;
-                let status = if ok { FontStatus::Loaded } else { FontStatus::Failed };
+                let ok = load_face(family, urls, "block", probe.clone()).await;
+                if !current() {
+                    return; // bases changed meanwhile; a fresh load was started
+                }
                 if !ok {
                     dioxus::logger::tracing::warn!("mushaf font for page {page} could not be loaded");
                 }
-                FONTS.write().pages.insert((font.mushaf_id(), page), status);
+                let key = (font.mushaf_id(), page);
+                let mut reg = FONTS.write();
+                if ok {
+                    reg.mark_verified(key, &probe);
+                }
+                reg.pages.insert(key, if ok { FontStatus::Loaded } else { FontStatus::Failed });
+            });
+        }
+        for (page, chars) in recheck {
+            let key = (font.mushaf_id(), page);
+            // Mark first so the same characters aren't probed twice concurrently.
+            FONTS.write().mark_verified(key, &chars);
+            let js = probe_js(&font.family(page), &chars);
+            dioxus::dioxus_core::spawn_forever(async move {
+                let ok = document::eval(&js).join::<bool>().await.unwrap_or(false);
+                if !ok && current() {
+                    dioxus::logger::tracing::warn!("mushaf font for page {page} lacks glyphs; showing text");
+                    FONTS.write().pages.insert(key, FontStatus::Failed);
+                }
             });
         }
     });
 }
 
 /// Whether `page`'s QCF font (current font choice) is loaded. Reactive per page.
-pub(crate) fn use_page_font_ready(page: Option<u16>) -> bool {
-    let settings = use_settings();
-    let ready = use_memo(use_reactive!(|page| {
-        let font = settings.read().mushaf_font;
-        page.is_some_and(|p| FONTS.read().is_loaded(font, p))
-    }));
+/// `font` must be the same font choice used for the words' family, so readiness
+/// and family can never disagree.
+pub(crate) fn use_page_font_ready(font: MushafFont, page: Option<u16>) -> bool {
+    let ready = use_memo(use_reactive!(|font, page| page.is_some_and(|p| FONTS.read().is_loaded(font, p))));
     ready()
 }
 
@@ -376,5 +484,51 @@ mod tests {
         assert_eq!(palette_css(MushafFont::TajweedV4, &[]), "");
         let css = palette_css(MushafFont::TajweedV4, &[1, 22]);
         assert!(css.contains("font-family: \"p1-v4\", \"p22-v4\"; base-palette: 1;"));
+    }
+
+    #[test]
+    fn new_glyphs_on_loaded_pages_are_rechecked() {
+        let mut r = FontRegistry::default();
+        let key = (MushafFont::TajweedV4.mushaf_id(), 7);
+        r.mark_verified(key, "ab");
+        assert_eq!(r.unverified(key, "a b c a"), "c");
+        assert_eq!(r.unverified((key.0, 8), "xx y"), "xy");
+        r.mark_verified(key, "c");
+        assert_eq!(r.unverified(key, "abc"), "");
+    }
+
+    #[test]
+    fn changing_bases_restarts_failed_and_in_flight_loads() {
+        let mut r = FontRegistry::default();
+        r.sync_bases(&["https://a".to_string()]);
+        let f = MushafFont::TajweedV4;
+        assert_eq!(r.claim(f, &[1, 2, 3]), vec![1, 2, 3]);
+        r.pages.insert((f.mushaf_id(), 1), FontStatus::Loaded);
+        r.pages.insert((f.mushaf_id(), 2), FontStatus::Failed);
+        let generation = r.generation;
+        r.sync_bases(&["https://b".to_string()]);
+        assert_ne!(r.generation, generation, "old in-flight results must be dropped");
+        // Page 1 stays loaded; failed page 2 and in-flight page 3 are claimed again.
+        assert_eq!(r.claim(f, &[1, 2, 3]), vec![2, 3]);
+        // Same bases again: nothing changes.
+        let generation = r.generation;
+        r.sync_bases(&["https://b".to_string()]);
+        assert_eq!(r.generation, generation);
+    }
+
+    #[test]
+    fn font_signatures() {
+        assert!(looks_like_font(b"wOF2rest"));
+        assert!(looks_like_font(&[0, 1, 0, 0, 9]));
+        assert!(!looks_like_font(b"<!DOCTYPE html>"));
+        assert!(!looks_like_font(b""));
+    }
+
+    #[test]
+    fn load_js_removes_failed_faces_and_escapes_values() {
+        let js = url_load_js("p1-v4", "url(\"x\")", "block", "\u{FB51}\"");
+        assert!(js.contains("document.fonts.delete(face)"));
+        assert!(js.contains(r#"const family = "p1-v4";"#));
+        assert!(probe_js("p2-v4", "a\"b").contains(r#"painted("p2-v4", "a\"b")"#));
     }
 }

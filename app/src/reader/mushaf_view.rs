@@ -83,11 +83,15 @@ pub(crate) fn MushafView(verses: ReadSignal<Vec<Verse>>, #[props(default)] trim:
     // Fonts for every page shown (+ page 1 for the Bismillah glyphs).
     let glyph_pages = use_memo(move || {
         let mut pages = layout.read().glyph_pages();
-        if let Some(v) = bismillah_verse.read().as_ref()
-            && let Some(g) = v.words.iter().filter(|w| !w.is_end_marker()).find_map(glyph::glyph_code)
-            && !pages.iter().any(|(p, _)| *p == 1)
-        {
-            pages.push((1, g));
+        if let Some(v) = bismillah_verse.read().as_ref() {
+            let glyphs: String =
+                v.words.iter().filter(|w| !w.is_end_marker()).filter_map(glyph::glyph_code).collect();
+            if !glyphs.is_empty() {
+                match pages.iter_mut().find(|(p, _)| *p == 1) {
+                    Some((_, all)) => all.push_str(&glyphs),
+                    None => pages.push((1, glyphs)),
+                }
+            }
         }
         pages
     });
@@ -199,8 +203,8 @@ fn PageView(
     wbw: WbwOpts,
     font: MushafFont,
 ) -> Element {
-    let ready = use_page_font_ready(block.page);
-    let bismillah_ready = use_page_font_ready(Some(1));
+    let ready = use_page_font_ready(font, block.page);
+    let bismillah_ready = use_page_font_ready(font, Some(1));
     let family = block.page.map(|p| font.family(p)).unwrap_or_default();
     let page_attr = block.page.map(|p| p.to_string());
     let mode_of = |c: &WordCell| {

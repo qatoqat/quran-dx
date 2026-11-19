@@ -103,21 +103,27 @@ impl Layout {
         self.pages.iter().flat_map(|p| p.items.iter())
     }
 
-    /// Distinct pages with glyph words, each with a sample glyph (for the
-    /// font render probe), in order of first appearance.
+    /// Distinct pages with glyph cells, each with ALL its glyph text (words and
+    /// ayah markers) for the font coverage probe, in order of first appearance.
     pub fn glyph_pages(&self) -> Vec<(u16, String)> {
         let mut out: Vec<(u16, String)> = Vec::new();
         for page in &self.pages {
             let Some(p) = page.page else { continue };
-            if out.iter().any(|(q, _)| *q == p) {
+            let glyphs: String = page
+                .items
+                .iter()
+                .flat_map(|i| match i {
+                    Item::Line { cells, .. } => cells.as_slice(),
+                    _ => &[],
+                })
+                .filter_map(|c| c.glyph.as_deref())
+                .collect();
+            if glyphs.is_empty() {
                 continue;
             }
-            let sample = page.items.iter().find_map(|i| match i {
-                Item::Line { cells, .. } => cells.iter().filter(|c| !c.is_end).find_map(|c| c.glyph.clone()),
-                _ => None,
-            });
-            if let Some(g) = sample {
-                out.push((p, g));
+            match out.iter_mut().find(|(q, _)| *q == p) {
+                Some((_, all)) => all.push_str(&glyphs),
+                None => out.push((p, glyphs)),
             }
         }
         out
@@ -173,8 +179,12 @@ fn word_cell(v: &Verse, w: &Word, layout: Option<(u16, u16)>) -> WordCell {
         page: layout.map(|(p, _)| p),
         line: layout.map(|(_, l)| l),
         is_end: w.is_end_marker(),
-        // Glyphs only with a known layout page (that page's font draws them).
-        glyph: layout.and_then(|_| glyph::glyph_code(w)),
+        // Glyphs only with a known layout page, and only if the glyph's font page
+        // (`v2_page`) is that resolved page: the page's font draws them.
+        glyph: layout.and_then(|(page, _)| match w.v2_page {
+            Some(font_page) if font_page != page => None,
+            _ => glyph::glyph_code(w),
+        }),
         text: glyph::unicode_text(w),
         translation: if w.is_end_marker() { None } else { non_empty(w.translation.as_ref()) },
         transliteration: if w.is_end_marker() { None } else { non_empty(w.transliteration.as_ref()) },
@@ -415,7 +425,8 @@ mod tests {
         assert_eq!(cells[0].glyph.as_deref(), Some("g1"));
         assert_eq!(cells[0].text.as_deref(), Some("w1"));
         assert_eq!(cells[0].translation.as_deref(), Some("t1"));
-        assert_eq!(l.glyph_pages(), vec![(2, "g1".to_string()), (3, "g1".to_string())]);
+        // Every glyph on each page (words and ayah markers) is handed to the font probe.
+        assert_eq!(l.glyph_pages(), vec![(2, "g1g2g3g4".to_string()), (3, "g1g2g3".to_string())]);
     }
 
     #[test]
@@ -530,5 +541,22 @@ mod tests {
     fn empty_input() {
         assert_eq!(build_layout(&[], Trim::default()), Layout::default());
         assert!(Layout::default().glyph_pages().is_empty());
+    }
+
+    #[test]
+    fn end_marker_glyph_needs_its_resolved_page_font() {
+        // End marker without its own layout takes the previous word's slot (page 2);
+        // its glyph says it belongs to page 3's font, so it must be drawn as text.
+        let mut v = verse("2:4", &[(2, 14), (2, 14)]);
+        let end = v.words.last_mut().unwrap();
+        end.page_number = None;
+        end.line_number = None;
+        end.v2_page = Some(3);
+        let l = build_layout(&[v], Trim::default());
+        let Item::Line { cells, .. } = &l.pages[0].items[0] else { panic!() };
+        let marker = cells.iter().find(|c| c.is_end).unwrap();
+        assert_eq!(marker.page, Some(2));
+        assert_eq!(marker.glyph, None, "glyph from another page's font must not be used");
+        assert!(cells.iter().any(|c| !c.is_end && c.glyph.is_some()));
     }
 }
