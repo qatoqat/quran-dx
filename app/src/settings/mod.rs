@@ -2,7 +2,7 @@
 //! word-by-word rendering and footnotes.
 //!
 //! CONTRACT for other modules: `Settings` fields/methods below, `use_settings()`,
-//! `provide_settings()`, `FontLoader`, `SettingsPage`, `wbw::WordView`,
+//! `provide_settings()`, `FontLoader`, `SettingsPage`,
 //! `wbw::TranslationText`. Add fields freely; don't rename/remove.
 
 use dioxus::prelude::*;
