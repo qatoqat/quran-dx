@@ -2,15 +2,17 @@
 //!
 //! A feed fetches 50 verses per API page, appends them on "Load more" (or
 //! automatically when the bottom sentinel scrolls into view), and resets
-//! whenever the verse-related settings change.
+//! whenever the verse-related settings change. Loaded verses are drawn as
+//! 15-line mushaf pages by `mushaf_view::MushafView`.
 
 use dioxus::prelude::*;
-use quran_api::{Chapter, Client, Verse, VerseQuery, VersesResponse};
+use quran_api::{Client, Verse, VerseQuery, VersesResponse};
 
 use super::integrity::{self, IntegrityIssue};
+use super::mushaf_layout::Trim;
+use super::mushaf_view::MushafView;
 use super::parse::{PER_PAGE, VerseSpan, api_page_of, api_pages_for, next_page_within};
-use super::verse::VerseView;
-use super::{SurahHeading, find_chapter, use_chapters};
+use super::use_chapters;
 use crate::layout::{ErrorBox, Loading};
 use crate::settings::use_settings;
 
@@ -156,23 +158,8 @@ fn use_verse_feed(source: VerseSource) -> VerseFeed {
     feed
 }
 
-/// For each verse, the chapter whose heading should be shown before it
-/// (whenever the chapter differs from the previous verse's).
-pub(crate) fn chapter_breaks(verses: &[Verse]) -> Vec<Option<u16>> {
-    let mut prev = None;
-    verses
-        .iter()
-        .map(|v| {
-            let c = v.chapter_number();
-            let brk = if c != prev { c } else { None };
-            prev = c;
-            brk
-        })
-        .collect()
-}
-
-/// Verse list with "Load more", auto-load near the bottom, (optionally) surah
-/// headings where a new chapter starts, and an integrity warning banner.
+/// Mushaf pages of a verse source with "Load more", auto-load near the bottom,
+/// surah headers where a surah starts, and integrity warning banners.
 ///
 /// `expected`: for a chapter source, every verse that must be present once all
 /// pages have loaded (`1..=verses_count` or the requested range).
@@ -181,18 +168,19 @@ pub(crate) fn chapter_breaks(verses: &[Verse]) -> Vec<Option<u16>> {
 #[component]
 pub(crate) fn VerseList(
     source: VerseSource,
-    #[props(default)] show_headings: bool,
     /// `(chapter, span)` pairs that must all be present once everything has loaded.
     #[props(default)] expected: Vec<(u16, VerseSpan)>,
+    /// Whether the first/last mushaf line may be cut (verse-range views).
+    #[props(default)] trim: Trim,
 ) -> Element {
     let feed = use_verse_feed(source);
     let chapters = use_chapters();
-    let settings = use_settings();
     let expected = use_memo(use_reactive!(|expected| expected));
 
     // Integrity of what is loaded so far (completeness only once fully loaded).
     let issues = use_memo(move || {
-        let script_field = settings.read().script.field();
+        // The mushaf always shows Uthmani (QCF glyphs / KFGQPC Hafs text).
+        let script_field = "text_uthmani";
         let complete = (feed.next_page)().is_none() && !(feed.loading)() && (feed.error)().is_none();
         let expected_spans = expected.read();
         let expected: &[(u16, VerseSpan)] = if complete { &expected_spans } else { &[] };
@@ -226,15 +214,19 @@ pub(crate) fn VerseList(
         _ => None,
     };
 
-    let chapter_list: Vec<Chapter> = match &*chapters.read() {
-        Some(Ok(list)) if show_headings => list.clone(),
-        _ => Vec::new(),
-    };
-    let breaks = if show_headings { chapter_breaks(&verses) } else { vec![None; verses.len()] };
-
-    let fallback_keys = integrity::keys_where(&issues.read(), IntegrityIssue::is_word_issue);
-    let missing_keys =
-        integrity::keys_where(&issues.read(), |i| matches!(i, IntegrityIssue::MissingVerse { .. }));
+    let issues_now = issues.read();
+    let fallback_keys = integrity::keys_where(&issues_now, IntegrityIssue::is_structural_word_issue);
+    let empty_word_keys =
+        integrity::keys_where(&issues_now, |i| matches!(i, IntegrityIssue::EmptyWordText { .. }));
+    let layout_keys = integrity::keys_where(&issues_now, IntegrityIssue::is_layout_issue);
+    let shape_keys = integrity::keys_where(&issues_now, IntegrityIssue::is_page_shape_issue);
+    let glyph_keys =
+        integrity::keys_where(&issues_now, |i| matches!(i, IntegrityIssue::GlyphPageMismatch { .. }));
+    let missing_keys = integrity::keys_where(&issues_now, |i| matches!(i, IntegrityIssue::MissingVerse { .. }));
+    drop(issues_now);
+    let any_issue = [&fallback_keys, &empty_word_keys, &layout_keys, &shape_keys, &glyph_keys, &missing_keys]
+        .iter()
+        .any(|k| !k.is_empty());
 
     rsx! {
         if let Some((shown, total)) = short_by {
@@ -243,12 +235,36 @@ pub(crate) fn VerseList(
                 button { class: "load-more", r#type: "button", onclick: move |_| feed.reset(), "Reload" }
             }
         }
-        if !fallback_keys.is_empty() || !missing_keys.is_empty() {
+        if any_issue {
             div { class: "integrity-banner", role: "status",
                 if !fallback_keys.is_empty() {
                     p {
                         "Some verse data looked incomplete; showing full verse text instead for: "
                         {key_list(&fallback_keys)}
+                    }
+                }
+                if !empty_word_keys.is_empty() {
+                    p {
+                        "Some words came without Unicode text (marked ⟨?⟩ unless the mushaf font draws them) in: "
+                        {key_list(&empty_word_keys)}
+                    }
+                }
+                if !layout_keys.is_empty() {
+                    p {
+                        "Mushaf line data was missing for these verses; they are shown as flowing text: "
+                        {key_list(&layout_keys)}
+                    }
+                }
+                if !shape_keys.is_empty() {
+                    p {
+                        "The mushaf page layout looked inconsistent near (all words are still shown): "
+                        {key_list(&shape_keys)}
+                    }
+                }
+                if !glyph_keys.is_empty() {
+                    p {
+                        "Some words are shown as Unicode text because their glyph font page did not match: "
+                        {key_list(&glyph_keys)}
                     }
                 }
                 if !missing_keys.is_empty() {
@@ -266,24 +282,7 @@ pub(crate) fn VerseList(
                 }
             }
         }
-        div { class: "verse-list",
-            for (verse, brk) in verses.iter().cloned().zip(breaks) {
-                div { key: "{verse.verse_key}", class: "verse-item",
-                    if let Some(c) = brk {
-                        if let Some(ch) = find_chapter(&chapter_list, c) {
-                            SurahHeading {
-                                chapter: ch.clone(),
-                                bismillah: verse.verse_number == 1 && ch.bismillah_pre,
-                                continued: verse.verse_number != 1,
-                            }
-                        } else {
-                            h2 { class: "surah-heading-fallback", "Surah {c}" }
-                        }
-                    }
-                    VerseView { verse }
-                }
-            }
-        }
+        MushafView { verses: feed.verses, trim }
         if let Some(message) = error {
             div { class: "feed-error",
                 ErrorBox { message: "Could not load verses: {message}" }
@@ -341,13 +340,6 @@ mod tests {
             "id": 1, "verse_number": n, "verse_key": key
         }))
         .unwrap()
-    }
-
-    #[test]
-    fn breaks_on_chapter_change() {
-        let vs: Vec<Verse> = ["2:286", "3:1", "3:2", "4:1"].iter().map(|k| verse(k)).collect();
-        assert_eq!(chapter_breaks(&vs), vec![Some(2), Some(3), None, Some(4)]);
-        assert!(chapter_breaks(&[]).is_empty());
     }
 
     #[test]

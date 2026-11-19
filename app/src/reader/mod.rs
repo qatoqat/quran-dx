@@ -5,8 +5,12 @@
 //! - `chapter`: `/2`, `/2/255`, `/2/1-5` (+ legacy `/2:255` redirects).
 //! - `mushaf`: `/page/N` and `/juz/N`.
 //! - `feed`: paged verse loading shared by all views ("Load more" + auto-load).
-//! - `integrity`: checks that no verse or word goes missing.
-//! - `verse`: one verse card (falls back to verse text when words are incomplete).
+//! - `integrity`: checks that no verse or word goes missing (incl. mushaf layout data).
+//! - `mushaf_layout`: pure grouping of words into 15-line mushaf pages and lines.
+//! - `mushaf_view`: renders those pages (QCF glyphs, word-by-word, headers, Bismillah).
+//! - `glyph`: glyph vs Unicode-text choice per word (never nothing).
+//! - `fonts`: per-page QCF font loading (FontFace API; native bytes on desktop).
+//! - `verse`: per-verse copy action and plain-text helpers.
 
 use dioxus::prelude::*;
 use quran_api::Chapter;
@@ -16,9 +20,13 @@ use crate::settings::use_settings;
 
 mod chapter;
 mod feed;
+pub mod fonts;
+pub mod glyph;
 mod home;
 pub mod integrity;
 mod mushaf;
+pub mod mushaf_layout;
+pub(crate) mod mushaf_view;
 pub mod parse;
 pub mod verse;
 
@@ -109,8 +117,8 @@ pub(crate) fn PrevNext(
     }
 }
 
-/// The Bismillah shown before every surah except Al-Fatihah (where it is
-/// verse 1) and At-Tawbah.
+/// Unicode Bismillah, the last-resort text of the Bismillah line (shown before
+/// every surah except Al-Fatihah, where it is verse 1, and At-Tawbah).
 pub(crate) const BISMILLAH: &str = "بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ";
 
 /// Surah title block: names, revelation place, verse count, optional Bismillah.
