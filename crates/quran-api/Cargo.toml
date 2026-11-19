@@ -14,3 +14,5 @@ reqwest.workspace = true
 
 [dev-dependencies]
 pretty_assertions = "1"
+# Only for the `#[ignore]`d live API tests in tests/live.rs.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
