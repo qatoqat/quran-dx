@@ -35,6 +35,19 @@ impl Tag {
     }
 }
 
+/// HTML element names we treat as markup. Anything else in angle brackets
+/// (e.g. `<ye>`, `<<Allah>>`) is ordinary translation text.
+fn is_html_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "a" | "abbr" | "b" | "bdi" | "bdo" | "big" | "blockquote" | "br" | "cite" | "code" | "dd" | "del"
+            | "dfn" | "div" | "dl" | "dt" | "em" | "font" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+            | "hr" | "i" | "img" | "ins" | "kbd" | "li" | "mark" | "ol" | "p" | "pre" | "q" | "s"
+            | "samp" | "script" | "small" | "span" | "strike" | "strong" | "style" | "sub" | "sup"
+            | "table" | "tbody" | "td" | "th" | "thead" | "tr" | "tt" | "u" | "ul" | "var" | "wbr"
+    )
+}
+
 /// Split API HTML into safe segments.
 pub fn tokenize(input: &str) -> Vec<Segment> {
     let mut out = Builder::default();
@@ -63,8 +76,9 @@ pub fn tokenize(input: &str) -> Vec<Segment> {
             };
             continue;
         }
-        let Some((tag, len)) = parse_tag(rest) else {
-            // Not a tag (e.g. "a < b"): keep '<' as text.
+        let Some((tag, len)) = parse_tag(rest).filter(|(t, _)| is_html_tag(&t.name)) else {
+            // Not a tag (e.g. "a < b", or bracketed words like "<ye>" in a translation):
+            // keep '<' as text so no words of the translation are lost.
             emit_text(&mut out, &mut footnote, &skip_until, "<", italic, bold);
             rest = &rest[1..];
             continue;
@@ -475,5 +489,21 @@ mod tests {
             vec![t("one"), Segment::LineBreak, t("two")]
         );
         assert_eq!(plain_text("a<br>b <i>c</i>"), "a\nb c");
+    }
+
+    #[test]
+    fn bracketed_words_are_text_not_tags() {
+        let text = |input: &str| -> String {
+            tokenize(input)
+                .into_iter()
+                .filter_map(|s| match s {
+                    Segment::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(text("O you <ye> who believe"), "O you <ye> who believe");
+        assert_eq!(text("<<Allah>> is"), "<<Allah>> is");
+        assert_eq!(text("He is <i>the</i> One"), "He is the One");
     }
 }

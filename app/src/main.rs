@@ -16,6 +16,9 @@ mod search;
 mod settings;
 mod util;
 
+#[cfg(test)]
+mod mount_tests;
+
 pub use route::Route;
 
 const BASE_CSS: Asset = asset!("/assets/main.css");

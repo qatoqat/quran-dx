@@ -24,6 +24,17 @@ struct Tag {
 }
 
 /// Parse the inside of `<...>` (without the angle brackets).
+fn is_html_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "a" | "abbr" | "b" | "bdi" | "bdo" | "big" | "blockquote" | "br" | "cite" | "code" | "dd" | "del"
+            | "dfn" | "div" | "dl" | "dt" | "em" | "font" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+            | "hr" | "i" | "img" | "ins" | "kbd" | "li" | "mark" | "ol" | "p" | "pre" | "q" | "s"
+            | "samp" | "script" | "small" | "span" | "strike" | "strong" | "style" | "sub" | "sup"
+            | "table" | "tbody" | "td" | "th" | "thead" | "tr" | "tt" | "u" | "ul" | "var" | "wbr"
+    )
+}
+
 fn parse_tag(inner: &str) -> Option<Tag> {
     let inner = inner.trim();
     let (closing, rest) = match inner.strip_prefix('/') {
@@ -127,7 +138,9 @@ pub fn segments(html: &str) -> Vec<Segment> {
             i = lt + 1;
             continue;
         };
-        let Some(tag) = parse_tag(&html[lt + 1..gt]) else {
+        // Only real HTML element names are markup; `<ye>`-style bracketed words in a
+        // translation stay as text.
+        let Some(tag) = parse_tag(&html[lt + 1..gt]).filter(|t| is_html_tag(&t.name)) else {
             // Comments, doctypes or `a < b > c` text: drop `<!...>`, keep the rest as text.
             if html[lt + 1..].starts_with('!') {
                 if skipping.is_none() {
@@ -262,5 +275,10 @@ mod tests {
             segments("&lt;em&gt; is <em>&amp;</em>"),
             vec![seg("<em> is ", false), seg("&", true)]
         );
+    }
+
+    #[test]
+    fn bracketed_words_kept() {
+        assert_eq!(segments("O you <ye> who <em>believe</em>"), vec![seg("O you <ye> who ", false), seg("believe", true)]);
     }
 }

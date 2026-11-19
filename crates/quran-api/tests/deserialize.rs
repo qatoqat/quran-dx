@@ -424,9 +424,9 @@ fn missing_optional_fields_are_fine() {
     assert!(c.pages.is_empty());
     assert_eq!(c.translated_name.language_name, None);
 
-    // Verses response without pagination (e.g. a by_key-like payload reshaped).
-    let r: VersesResponse = serde_json::from_str(r#"{"verses": []}"#).unwrap();
-    assert_eq!(r.pagination, Pagination::default());
+    // A verses response without pagination is an error on purpose: treating it as
+    // "no more pages" could silently cut a juz or page short.
+    assert!(serde_json::from_str::<VersesResponse>(r#"{"verses": []}"#).is_err());
 
     // Pagination on the last page has next_page: null.
     let p: Pagination = serde_json::from_str(

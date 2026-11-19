@@ -213,20 +213,58 @@ pub fn word_count(verse: &Verse) -> usize {
     verse.words.iter().filter(|w| !w.is_end_marker()).count()
 }
 
+/// (b) Gaps across chapter boundaries (list must be sorted). When consecutive
+/// verses belong to different chapters, the earlier chapter must end at its last
+/// verse, every chapter in between must be fully present, and the later chapter
+/// must start at verse 1. `verses_count` gives a chapter's length when known;
+/// without it only the "starts at 1" part can be checked.
+pub fn check_boundaries(verses: &[Verse], verses_count: impl Fn(u16) -> Option<u16>) -> Vec<IntegrityIssue> {
+    let mut issues = Vec::new();
+    let missing = |issues: &mut Vec<IntegrityIssue>, c: u16, from: u16, to: u16| {
+        for n in from..=to {
+            issues.push(IntegrityIssue::MissingVerse { verse_key: format!("{c}:{n}") });
+        }
+    };
+    for w in verses.windows(2) {
+        let (a, b) = (sort_key(&w[0]), sort_key(&w[1]));
+        if a.0 >= b.0 || b.0 == u16::MAX {
+            continue;
+        }
+        if let Some(last) = verses_count(a.0) {
+            missing(&mut issues, a.0, a.1 + 1, last);
+        }
+        for c in a.0 + 1..b.0 {
+            if let Some(last) = verses_count(c) {
+                missing(&mut issues, c, 1, last);
+            } else {
+                issues.push(IntegrityIssue::MissingVerse { verse_key: format!("{c}:1") });
+            }
+        }
+        missing(&mut issues, b.0, 1, b.1.saturating_sub(1));
+    }
+    issues
+}
+
 /// All issues for a loaded list (already sorted/deduped).
-/// `expected` is `(chapter, span)` once everything requested has been loaded.
+/// `expected` lists `(chapter, span)` that must be fully present; pass it only once
+/// everything requested has been loaded.
 pub fn check_all(
     verses: &[Verse],
     script_field: &str,
-    expected: Option<(u16, VerseSpan)>,
+    expected: &[(u16, VerseSpan)],
+    verses_count: impl Fn(u16) -> Option<u16>,
 ) -> Vec<IntegrityIssue> {
     let mut issues = check_gaps(verses);
-    if let Some((chapter, span)) = expected {
-        for i in check_expected(verses, chapter, span) {
+    let add = |found: Vec<IntegrityIssue>, issues: &mut Vec<IntegrityIssue>| {
+        for i in found {
             if !issues.contains(&i) {
                 issues.push(i);
             }
         }
+    };
+    add(check_boundaries(verses, &verses_count), &mut issues);
+    for &(chapter, span) in expected {
+        add(check_expected(verses, chapter, span), &mut issues);
     }
     for v in verses {
         issues.extend(word_issues(v, script_field));
@@ -316,7 +354,7 @@ mod tests {
         // check_all doesn't double-report a gap found both ways.
         let vs = vec![good("2:1"), good("2:3")];
         assert_eq!(
-            check_all(&vs, U, Some((2, VerseSpan { from: 1, to: 3 }))),
+            check_all(&vs, U, &[(2, VerseSpan { from: 1, to: 3 })], |_| None),
             vec![IntegrityIssue::MissingVerse { verse_key: "2:2".into() }]
         );
     }
@@ -412,5 +450,39 @@ mod tests {
         assert_eq!(keys_where(&issues, IntegrityIssue::is_word_issue), ["2:5", "2:9"]);
         assert_eq!(keys_where(&issues, |i| matches!(i, IntegrityIssue::MissingVerse { .. })), ["2:7"]);
         assert_eq!(issues[0].to_string(), "2:5: word 1 has no text");
+    }
+
+    #[test]
+    fn boundary_gap_at_chapter_start_is_flagged() {
+        // Juz 30: 78:46 then 79:2 -> 79:1 missing (no chapter lengths needed).
+        let vs = vec![good("78:46"), good("79:2")];
+        assert_eq!(
+            check_boundaries(&vs, |_| None),
+            vec![IntegrityIssue::MissingVerse { verse_key: "79:1".into() }]
+        );
+    }
+
+    #[test]
+    fn boundary_gap_at_chapter_end_and_whole_chapter_flagged() {
+        let counts = |c: u16| match c {
+            112 => Some(4),
+            113 => Some(5),
+            _ => None,
+        };
+        // 112:3 then 114:1 -> 112:4 and all of 113 missing.
+        let vs = vec![good("112:3"), good("114:1")];
+        let keys: Vec<String> = check_boundaries(&vs, counts).iter().map(|i| i.verse_key().to_string()).collect();
+        assert_eq!(keys, vec!["112:4", "113:1", "113:2", "113:3", "113:4", "113:5"]);
+        // Clean boundary -> nothing.
+        assert!(check_boundaries(&[good("112:4"), good("113:1")], counts).is_empty());
+    }
+
+    #[test]
+    fn check_all_checks_every_expected_span() {
+        let vs = vec![good("78:40"), good("79:1")];
+        let spans = [(78, VerseSpan { from: 39, to: 40 }), (79, VerseSpan { from: 1, to: 2 })];
+        let keys: Vec<String> =
+            check_all(&vs, U, &spans, |_| None).iter().map(|i| i.verse_key().to_string()).collect();
+        assert_eq!(keys, vec!["78:39", "79:2"]);
     }
 }

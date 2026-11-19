@@ -28,7 +28,7 @@ pub use mushaf::{JuzPage, MushafPage};
 
 /// Chapter list cache: `(locale, chapters)`. The list is small and static, so
 /// every view shares one request per locale.
-static CHAPTERS: GlobalSignal<Option<(String, Vec<Chapter>)>> = Signal::global(|| None);
+pub(crate) static CHAPTERS: GlobalSignal<Option<(String, Vec<Chapter>)>> = Signal::global(|| None);
 
 /// All 114 chapters in the user's locale (cached). Errors are stringified.
 pub(crate) fn use_chapters() -> Resource<Result<Vec<Chapter>, String>> {

@@ -24,7 +24,8 @@ fn plural(n: u32, one: &str, many: &str) -> String {
 }
 
 #[component]
-pub fn SearchPage(q: String) -> Element {
+pub fn SearchPage(q: crate::route::SearchQuery) -> Element {
+    let q = q.0;
     // Keyed by query so pagination state resets to page 1 whenever `q` changes.
     rsx! { SearchResults { key: "{q}", q: q.clone() } }
 }

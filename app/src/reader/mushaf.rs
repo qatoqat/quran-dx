@@ -56,6 +56,21 @@ pub fn JuzPage(juz: u8) -> Element {
 #[component]
 fn JuzView(juz: u8) -> Element {
     use_scroll_to_top();
+    // The juz's verse ranges per surah, so a missing verse at either end of the juz
+    // (where the page-to-page checks can't see it) is still reported.
+    let client = crate::use_api();
+    let juzs = use_resource(move || {
+        let client = client.clone();
+        async move { client.juzs().await.ok() }
+    });
+    let expected = use_memo(move || match &*juzs.read() {
+        Some(Some(list)) => list
+            .iter()
+            .find(|j| j.juz_number == juz)
+            .map(|j| super::parse::juz_mapping(&j.verse_mapping))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    });
     let prev = (juz > 1).then(|| (Route::JuzPage { juz: juz - 1 }, format!("Juz {}", juz - 1)));
     let next = (juz < JUZ_COUNT).then(|| (Route::JuzPage { juz: juz + 1 }, format!("Juz {}", juz + 1)));
     rsx! {
@@ -65,7 +80,7 @@ fn JuzView(juz: u8) -> Element {
                 p { class: "view-subtitle", "of {JUZ_COUNT}" }
             }
             PrevNext { prev: prev.clone(), next: next.clone() }
-            VerseList { source: VerseSource::Juz(juz), show_headings: true }
+            VerseList { source: VerseSource::Juz(juz), show_headings: true, expected: expected() }
             PrevNext { prev, next }
         }
     }

@@ -140,7 +140,8 @@ pub struct Pagination {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VersesResponse {
     pub verses: Vec<Verse>,
-    #[serde(default)]
+    /// Required on purpose: a response without pagination must fail loudly rather
+    /// than look like "everything loaded" and silently cut a juz/page short.
     pub pagination: Pagination,
 }
 

@@ -37,7 +37,7 @@ impl Client {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            http: build_http(),
         }
     }
 
@@ -141,6 +141,24 @@ impl Client {
             )
             .await?;
         Ok(r.search)
+    }
+}
+
+/// On native targets give every request a deadline so a hung connection turns into
+/// a visible error (with retry) instead of an endless "Loading…". In the browser,
+/// `fetch` has its own network timeouts and reqwest's wasm client has no timeout option.
+fn build_http() -> reqwest::Client {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(45))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        reqwest::Client::new()
     }
 }
 

@@ -97,7 +97,7 @@ fn ChapterView(chapter: u16, span: Option<VerseSpan>) -> Element {
                     Link { to: chapter_route(chapter, None), "Read the full surah" }
                 }
             }
-            VerseList { key: "{source_key}", source, expected: Some(span.unwrap_or(full)) }
+            VerseList { key: "{source_key}", source, expected: vec![(chapter, span.unwrap_or(full))] }
             PrevNext { prev, next, middle }
         }
     }

@@ -38,7 +38,7 @@ impl Item {
         match self {
             Item::Nav(s) => s.route(),
             Item::Verse(r) => verse_route(&r.verse_key),
-            Item::All => Route::SearchPage { q: query.trim().to_string() },
+            Item::All => Route::SearchPage { q: crate::route::SearchQuery(query.trim().to_string()) },
         }
     }
 }
@@ -85,7 +85,7 @@ pub fn SearchBox() -> Element {
     // Mirror the query of the results page into the box (e.g. after a reload of
     // `/search?q=...` or Back/Forward between searches).
     let route_q = match use_route::<Route>() {
-        Route::SearchPage { q } => Some(q),
+        Route::SearchPage { q } => Some(q.0),
         _ => None,
     };
     use_effect(use_reactive!(|route_q| {
@@ -325,6 +325,6 @@ mod tests {
 
     #[test]
     fn item_routes() {
-        assert_eq!(Item::All.route(" light "), Route::SearchPage { q: "light".into() });
+        assert_eq!(Item::All.route(" light "), Route::SearchPage { q: crate::route::SearchQuery("light".into()) });
     }
 }

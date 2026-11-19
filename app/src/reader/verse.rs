@@ -43,7 +43,7 @@ pub fn VerseView(verse: Verse) -> Element {
             div { class: "verse-arabic", dir: "rtl", lang: "ar",
                 if use_words {
                     for w in verse.words.iter().cloned() {
-                        WordView { key: "{w.id}", word: w }
+                        WordView { key: "{w.id}", word: w, verse_number: verse.verse_number }
                     }
                 } else if fallback_tokens.is_empty() {
                     span { class: "verse-text-missing", dir: "ltr",

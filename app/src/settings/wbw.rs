@@ -38,13 +38,23 @@ pub fn ascii_digits(s: &str) -> String {
         .collect()
 }
 
+/// `255` -> `٢٥٥`
+fn arabic_indic(n: u16) -> String {
+    n.to_string().chars().map(|c| c.to_digit(10).and_then(|d| char::from_u32(0x0660 + d)).unwrap_or(c)).collect()
+}
+
 fn non_empty(t: &Option<quran_api::WordText>) -> Option<String> {
     t.as_ref()?.text.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from)
 }
 
 /// One Arabic word, with word-by-word translation/transliteration per settings.
 #[component]
-pub fn WordView(word: Word) -> Element {
+pub fn WordView(
+    word: Word,
+    /// Used for the ayah-number marker if the API's end-marker word has no text.
+    #[props(default)]
+    verse_number: Option<u16>,
+) -> Element {
     let settings = use_settings();
     let (script, wbw, locale) = {
         let s = settings.read();
@@ -54,7 +64,9 @@ pub fn WordView(word: Word) -> Element {
     let position = word.position;
 
     if word.is_end_marker() {
-        let text = word_text(&word, script).unwrap_or_default();
+        let text = word_text(&word, script)
+            .or_else(|| verse_number.map(arabic_indic))
+            .unwrap_or_default();
         let number = ascii_digits(&text);
         return rsx! {
             span { class: "ayah-marker", role: "img", aria_label: "end of ayah {number}",

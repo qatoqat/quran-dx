@@ -129,14 +129,19 @@ impl VerseFeed {
 fn use_verse_feed(source: VerseSource) -> VerseFeed {
     let settings = use_settings();
     let query = use_memo(move || settings.read().verse_query());
-    let client = use_signal(crate::use_api);
+    // Read the context *before* creating the signal: calling a hook (use_context)
+    // inside another hook's initializer panics in Dioxus ("hook list already borrowed").
+    let api = crate::use_api();
+    let client = use_signal(move || api);
     let feed = VerseFeed {
         source,
         client,
         query,
         verses: use_signal(Vec::new),
-        next_page: use_signal(|| None),
-        loading: use_signal(|| false),
+        // Start "loading" so nothing claims the list is complete (or empty) before
+        // the mount effect below has started the first request.
+        next_page: use_signal(move || Some(source.first_api_page())),
+        loading: use_signal(|| true),
         error: use_signal(|| None),
         total: use_signal(|| None),
         merge_issues: use_signal(Vec::new),
@@ -177,22 +182,27 @@ pub(crate) fn chapter_breaks(verses: &[Verse]) -> Vec<Option<u16>> {
 pub(crate) fn VerseList(
     source: VerseSource,
     #[props(default)] show_headings: bool,
-    #[props(default)] expected: Option<VerseSpan>,
+    /// `(chapter, span)` pairs that must all be present once everything has loaded.
+    #[props(default)] expected: Vec<(u16, VerseSpan)>,
 ) -> Element {
     let feed = use_verse_feed(source);
     let chapters = use_chapters();
     let settings = use_settings();
+    let expected = use_memo(use_reactive!(|expected| expected));
 
     // Integrity of what is loaded so far (completeness only once fully loaded).
     let issues = use_memo(move || {
         let script_field = settings.read().script.field();
         let complete = (feed.next_page)().is_none() && !(feed.loading)() && (feed.error)().is_none();
-        let expected = match (source, expected) {
-            (VerseSource::Chapter { chapter, .. }, Some(span)) if complete => Some((chapter, span)),
-            _ => None,
+        let expected_spans = expected.read();
+        let expected: &[(u16, VerseSpan)] = if complete { &expected_spans } else { &[] };
+        let counts: Vec<(u16, u16)> = match &*chapters.read() {
+            Some(Ok(list)) => list.iter().map(|c| (c.id, c.verses_count)).collect(),
+            _ => Vec::new(),
         };
+        let verses_count = |c: u16| counts.iter().find(|(id, _)| *id == c).map(|(_, n)| *n);
         let mut issues = feed.merge_issues.read().clone();
-        issues.extend(integrity::check_all(&feed.verses.read(), script_field, expected));
+        issues.extend(integrity::check_all(&feed.verses.read(), script_field, expected, verses_count));
         issues
     });
     use_effect(move || {
@@ -208,6 +218,13 @@ pub(crate) fn VerseList(
     let error = (feed.error)();
     let has_more = (feed.next_page)().is_some();
     let total = (feed.total)();
+    // Pages/juz have no chapter span up front: once loading finishes, the number of
+    // verses shown must match the API's own total for the page/juz.
+    let complete = !has_more && !loading && error.is_none();
+    let short_by = match total {
+        Some(t) if complete && (verses.len() as u32) < t => Some((verses.len(), t)),
+        _ => None,
+    };
 
     let chapter_list: Vec<Chapter> = match &*chapters.read() {
         Some(Ok(list)) if show_headings => list.clone(),
@@ -220,6 +237,12 @@ pub(crate) fn VerseList(
         integrity::keys_where(&issues.read(), |i| matches!(i, IntegrityIssue::MissingVerse { .. }));
 
     rsx! {
+        if let Some((shown, total)) = short_by {
+            div { class: "integrity-banner", role: "status",
+                p { "Only {shown} of {total} verses were loaded; some verses may be missing." }
+                button { class: "load-more", r#type: "button", onclick: move |_| feed.reset(), "Reload" }
+            }
+        }
         if !fallback_keys.is_empty() || !missing_keys.is_empty() {
             div { class: "integrity-banner", role: "status",
                 if !fallback_keys.is_empty() {
