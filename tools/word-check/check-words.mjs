@@ -5,19 +5,23 @@
 // words straight from the Quran.com API (independent of the app's own code), opens
 // the view in a real browser, loads every verse, and compares verse by verse:
 //   - every verse key is on the page, none extra, none duplicated
-//   - number of rendered Arabic words == number of non-end words from the API
-//   - the rendered word texts equal the API's text_uthmani, in order
-//   - no `.word-missing` placeholders and no verses that fell back to verse text
+//   - every word of every verse is rendered, in order, at its `c:v:position`
+//   - each word shows the right text: the QCF glyph (`code_v2`) when its page font
+//     loaded, otherwise the Unicode fallback (`qpc_uthmani_hafs`/`text_uthmani`)
+//   - each word sits on the API's mushaf page and line (15-line layout)
+//   - no `⟨?⟩` placeholders; words shown as Unicode fallback are reported
+//     separately (fonts not loading is a problem, but no word is lost)
 //
 // Usage (with the app running via `cd app && dx serve --platform web`):
 //   cd tools/word-check && npm install && npx playwright install chromium
 //   node check-words.mjs                          # surahs 1-114 + sample ranges + juz 1-30
 //   node check-words.mjs --views chapters --chapters 1-10,18
 //   node check-words.mjs --views pages --pages 1-604
-//   node check-words.mjs --script indopak --wbw inline   # other render modes
+//   node check-words.mjs --font plain --wbw tooltip      # other render modes
 //   node check-words.mjs --base http://127.0.0.1:8080 --api https://api.quran.com/api/v4
 // Options: --views chapters,ranges,juz,pages  --chapters SPEC  --juz SPEC  --pages SPEC
-//          --ranges "2/45-55,2/255"  --script uthmani|indopak  --wbw tooltip|inline
+//          --ranges "2/45-55,2/255"  --font tajweed|plain  --wbw inline|tooltip
+//          --allow-fallback   (don't count Unicode-fallback words as problems)
 // Exit code 0 = everything matched, 1 = problems found (see report.json).
 
 import { chromium } from "playwright";
@@ -34,9 +38,10 @@ const PAGES = parseSpec(args.pages ?? "1-604", 604);
 // ranges spanning several API pages, single verses, surahs without Bismillah.
 const RANGES = String(args.ranges ?? "1/1-7,2/45-55,2/49-51,2/100-151,2/255,2/286,9/1-5,18/60-82,114/1-6")
   .split(",").map((r) => r.trim()).filter(Boolean);
-const SCRIPT = String(args.script ?? "uthmani").toLowerCase();
-const SCRIPT_FIELD = SCRIPT === "indopak" ? "text_indopak" : "text_uthmani";
-const WBW = String(args.wbw ?? "tooltip").toLowerCase();
+const FONT = String(args.font ?? "tajweed").toLowerCase();
+const MUSHAF_ID = FONT === "plain" ? 1 : 19; // QCF V2 : QCF V4 tajweed (as the app requests)
+const WBW = String(args.wbw ?? "inline").toLowerCase();
+const ALLOW_FALLBACK = Boolean(args["allow-fallback"]);
 const LOAD_TIMEOUT_MS = Number(args.timeout ?? 20000);
 
 function parseArgs(argv) {
@@ -68,17 +73,28 @@ async function apiGet(path, params = {}) {
   }
 }
 
-/** verse_key -> array of expected word texts (non-end words) for an API listing. */
+/**
+ * verse_key -> expected non-end words for an API listing:
+ * [{ location, glyph, text, page, line }]
+ */
 async function expectedWords(apiPath, keep = () => true) {
   const out = new Map();
   for (let page = 1; ; page++) {
     const data = await apiGet(apiPath, {
-      words: "true", word_fields: SCRIPT_FIELD, per_page: "50", page: String(page), language: "en",
+      words: "true", per_page: "50", page: String(page), language: "en", mushaf: String(MUSHAF_ID),
+      word_fields: "location,code_v2,v2_page,page_number,line_number,qpc_uthmani_hafs,text_uthmani",
     });
     if (!data.pagination) throw new Error(`no pagination in ${apiPath} page ${page}`);
     for (const v of data.verses) {
       if (!keep(v)) continue;
-      out.set(v.verse_key, v.words.filter((w) => w.char_type_name !== "end").map((w) => norm(w[SCRIPT_FIELD] ?? w.text ?? "")));
+      out.set(v.verse_key, v.words.filter((w) => w.char_type_name !== "end").map((w) => ({
+        location: w.location ?? `${v.verse_key}:${w.position}`,
+        glyph: norm(w.code_v2 ?? ""),
+        text: norm(w.qpc_uthmani_hafs ?? w.text_uthmani ?? w.text ?? ""),
+        alt: norm(w.text_uthmani ?? w.text ?? ""),
+        page: w.page_number ?? null,
+        line: w.line_number ?? null,
+      })));
     }
     if (!data.pagination.next_page) break;
     await sleep(100);
@@ -90,7 +106,7 @@ const norm = (s) => s.normalize("NFC").replace(/\s+/g, " ").trim();
 
 /** Load every verse of the surah in the page (clicking "Load more" as needed). */
 async function loadAll(page, expectedCount) {
-  const count = () => page.locator("article[data-verse-key]").count();
+  const count = () => page.locator(".verse-anchor[data-verse-key]").count();
   let last = -1;
   let stalledSince = Date.now();
   while (true) {
@@ -109,59 +125,87 @@ async function loadAll(page, expectedCount) {
   }
 }
 
-/** What the page actually shows, per verse. */
-async function renderedWords(page) {
-  return page.$$eval("article[data-verse-key]", (articles) =>
-    articles.map((a) => {
-      const words = [...a.querySelectorAll(".verse-arabic .word")].map((w) => {
-        // Tooltip/inline modes nest the Arabic in .word-text next to wbw extras.
-        const t = w.querySelector(".word-text") ?? w;
-        return t.textContent;
-      });
-      return {
-        key: a.dataset.verseKey,
-        declared: Number(a.dataset.wordCount),
-        fallback: a.dataset.fallback === "true",
-        missing: a.querySelectorAll(".word-missing").length,
-        words,
-      };
-    }),
-  );
+/** What the page actually shows: verse anchors and every rendered word. */
+async function rendered(page) {
+  return page.evaluate(() => {
+    const anchors = [...document.querySelectorAll(".verse-anchor[data-verse-key]")].map((a) => ({
+      key: a.dataset.verseKey,
+      declared: Number(a.dataset.wordCount),
+    }));
+    const words = [...document.querySelectorAll(".word[data-location]")].map((w) => ({
+      location: w.dataset.location,
+      mode: w.dataset.mode,
+      page: w.dataset.page ? Number(w.dataset.page) : null,
+      line: w.dataset.line ? Number(w.dataset.line) : null,
+      text: (w.querySelector(".word-text") ?? w).textContent,
+      missing: w.classList.contains("word-missing"),
+    }));
+    const missingPlaceholders = document.querySelectorAll(".word-missing").length;
+    return { anchors, words, missingPlaceholders };
+  });
 }
 
 async function checkView(page, view) {
   const problems = [];
+  let fallbackWords = 0;
   const at = view.label;
   const expected = await view.expected();
   await page.goto(`${BASE}${view.path}`, { waitUntil: "domcontentloaded" });
-  await page.waitForSelector("article[data-verse-key]", { timeout: LOAD_TIMEOUT_MS }).catch(() => {});
+  await page.waitForSelector(".verse-anchor[data-verse-key]", { timeout: LOAD_TIMEOUT_MS }).catch(() => {});
   const loaded = await loadAll(page, expected.size);
-  const rendered = await renderedWords(page);
+  // Give page fonts a moment so glyph mode can kick in before we read the DOM.
+  await page.evaluate(() => document.fonts.ready).catch(() => {});
+  await sleep(500);
+  const { anchors, words, missingPlaceholders } = await rendered(page);
 
   if (await page.locator(".integrity-banner").count()) {
     problems.push({ at, kind: "integrity-banner", detail: (await page.locator(".integrity-banner").first().innerText()).slice(0, 300) });
   }
   if (loaded < expected.size) problems.push({ at, kind: "not-all-verses-loaded", detail: `${loaded}/${expected.size}` });
+  if (missingPlaceholders) problems.push({ at, kind: "word-missing-placeholder", detail: missingPlaceholders });
 
+  // Verse anchors: present once each, nothing unexpected, declared counts right.
   const seen = new Set();
-  for (const r of rendered) {
-    if (seen.has(r.key)) problems.push({ at, key: r.key, kind: "duplicate-verse" });
-    seen.add(r.key);
-    const exp = expected.get(r.key);
-    if (!exp) { problems.push({ at, key: r.key, kind: "unexpected-verse" }); continue; }
-    const got = r.words.map(norm);
-    if (r.fallback) problems.push({ at, key: r.key, kind: "fell-back-to-verse-text" });
-    if (r.missing) problems.push({ at, key: r.key, kind: "word-missing-placeholder", detail: r.missing });
-    if (got.length !== exp.length) {
-      problems.push({ at, key: r.key, kind: "word-count", detail: `rendered ${got.length}, expected ${exp.length}` });
-    } else if (!r.fallback) {
-      const i = got.findIndex((w, idx) => w !== exp[idx]);
-      if (i >= 0) problems.push({ at, key: r.key, kind: "word-text", detail: `position ${i + 1}: rendered "${got[i]}", expected "${exp[i]}"` });
-    }
-    if (r.declared !== got.length) problems.push({ at, key: r.key, kind: "declared-count", detail: `data-word-count ${r.declared}, rendered ${got.length}` });
+  for (const a of anchors) {
+    if (seen.has(a.key)) problems.push({ at, key: a.key, kind: "duplicate-verse" });
+    seen.add(a.key);
+    const exp = expected.get(a.key);
+    if (!exp) { problems.push({ at, key: a.key, kind: "unexpected-verse" }); continue; }
+    if (a.declared !== exp.length) problems.push({ at, key: a.key, kind: "declared-count", detail: `data-word-count ${a.declared}, API ${exp.length}` });
   }
   for (const key of expected.keys()) if (!seen.has(key)) problems.push({ at, key, kind: "missing-verse" });
-  return { verses: expected.size, words: [...expected.values()].reduce((s, w) => s + w.length, 0), problems };
+
+  // Words, per verse, in order.
+  const byVerse = new Map();
+  for (const w of words) {
+    const key = w.location.split(":").slice(0, 2).join(":");
+    if (!byVerse.has(key)) byVerse.set(key, []);
+    byVerse.get(key).push(w);
+  }
+  for (const [key, exp] of expected) {
+    const got = byVerse.get(key) ?? [];
+    if (got.length !== exp.length) {
+      problems.push({ at, key, kind: "word-count", detail: `rendered ${got.length}, expected ${exp.length}` });
+    }
+    const n = Math.min(got.length, exp.length);
+    for (let i = 0; i < n; i++) {
+      const g = got[i], e = exp[i];
+      if (g.location !== e.location) { problems.push({ at, key, kind: "word-order", detail: `#${i + 1}: rendered ${g.location}, expected ${e.location}` }); break; }
+      const text = norm(g.text);
+      if (g.mode === "glyph") {
+        if (text !== e.glyph) problems.push({ at, key, kind: "glyph", detail: `${e.location}: rendered ${JSON.stringify(text)}, expected ${JSON.stringify(e.glyph)}` });
+      } else {
+        fallbackWords++;
+        if (text !== e.text && text !== e.alt) problems.push({ at, key, kind: "word-text", detail: `${e.location}: rendered "${text}", expected "${e.text}"` });
+      }
+      if (e.page != null && g.page !== e.page) problems.push({ at, key, kind: "page", detail: `${e.location}: on page ${g.page}, API ${e.page}` });
+      if (e.line != null && g.line !== e.line) problems.push({ at, key, kind: "line", detail: `${e.location}: on line ${g.line}, API ${e.line}` });
+    }
+  }
+  if (fallbackWords && !ALLOW_FALLBACK) {
+    problems.push({ at, kind: "font-fallback", detail: `${fallbackWords} word(s) shown as Unicode text because the page font did not load (no words lost)` });
+  }
+  return { verses: expected.size, words: [...expected.values()].reduce((s, w) => s + w.length, 0), fallbackWords, problems };
 }
 
 function buildViews() {
@@ -194,8 +238,8 @@ const browser = await chromium.launch();
 const context = await browser.newContext();
 // Start from known settings so rendered text compares against the matching API field.
 const settings = {
-  script: SCRIPT === "indopak" ? "IndoPak" : "Uthmani",
-  word_by_word: { show_translation: true, show_transliteration: true, display: WBW === "inline" ? "Inline" : "Tooltip" },
+  mushaf_font: FONT === "plain" ? "MadaniV2" : "TajweedV4",
+  word_by_word: { show_translation: true, show_transliteration: true, display: WBW === "tooltip" ? "Tooltip" : "Inline" },
 };
 await context.addInitScript((json) => {
   try { localStorage.setItem("quran-settings-v1", json); } catch {}
@@ -204,7 +248,7 @@ const page = await context.newPage();
 page.on("pageerror", (e) => console.error("  page error:", e.message));
 
 const views = buildViews();
-const report = { base: BASE, api: API, script: SCRIPT, wbw: WBW, views: [], totals: { views: views.length, verses: 0, words: 0, problems: 0 } };
+const report = { base: BASE, api: API, font: FONT, wbw: WBW, views: [], totals: { views: views.length, verses: 0, words: 0, problems: 0 } };
 for (const view of views) {
   try {
     const r = await checkView(page, view);
@@ -223,5 +267,5 @@ for (const view of views) {
 await browser.close();
 
 writeFileSync("report.json", JSON.stringify(report, null, 2));
-console.log(`\nChecked ${views.length} views (${SCRIPT}, ${WBW}), ${report.totals.verses} verses, ${report.totals.words} words: ${report.totals.problems} problem(s). Details in report.json`);
+console.log(`\nChecked ${views.length} views (${FONT}, ${WBW}), ${report.totals.verses} verses, ${report.totals.words} words: ${report.totals.problems} problem(s). Details in report.json`);
 process.exit(report.totals.problems ? 1 : 0);
