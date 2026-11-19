@@ -271,6 +271,7 @@ mod tests {
             line_number: None,
             translation: None,
             transliteration: None,
+            ..Default::default()
         }
     }
 

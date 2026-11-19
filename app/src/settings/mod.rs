@@ -37,11 +37,61 @@ impl QuranScript {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WbwDisplay {
     /// Show word translation/transliteration on hover/tap.
-    #[default]
     Tooltip,
-    /// Show it under each word.
+    /// Show it under each word (default: like quran.com's word-by-word view).
+    #[default]
     Inline,
 }
+
+/// Which King Fahd (KFGQPC) page fonts draw the 15-line Madani mushaf
+/// (Uthman Taha's calligraphy). Both use the API's `code_v2` glyph codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MushafFont {
+    /// QCF V4 tajweed-coloured fonts (COLRv1).
+    #[default]
+    TajweedV4,
+    /// QCF V2 single-colour fonts.
+    MadaniV2,
+}
+
+impl MushafFont {
+    /// `mushaf=` id for the API, so `page_number`/`line_number` match the font's layout.
+    pub fn mushaf_id(self) -> u32 {
+        match self {
+            MushafFont::TajweedV4 => quran_api::query::mushaf::QCF_TAJWEED_V4,
+            MushafFont::MadaniV2 => quran_api::query::mushaf::QCF_V2,
+        }
+    }
+
+    /// Path of a page's font file below the font base URL (quran.com layout).
+    pub fn font_path(self, page: u16) -> String {
+        match self {
+            MushafFont::TajweedV4 => format!("hafs/v4/colrv1/woff2/p{page}.woff2"),
+            MushafFont::MadaniV2 => format!("hafs/v2/woff2/p{page}.woff2"),
+        }
+    }
+
+    /// CSS font-family name registered for a page, e.g. `p526-v4`.
+    pub fn family(self, page: u16) -> String {
+        match self {
+            MushafFont::TajweedV4 => format!("p{page}-v4"),
+            MushafFont::MadaniV2 => format!("p{page}-v2"),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MushafFont::TajweedV4 => "Tajweed colours (QCF V4)",
+            MushafFont::MadaniV2 => "Plain (QCF V2)",
+        }
+    }
+}
+
+/// Where the QCF fonts are fetched from, tried in order. Each must contain the
+/// quran.com `fonts/quran/...` layout (`hafs/v4/colrv1/woff2/p1.woff2`, ...).
+/// A user-set `Settings::font_base_url` is tried first.
+pub const DEFAULT_FONT_BASES: &[&str] =
+    &["https://static.qurancdn.com/fonts/quran", "https://quran.com/fonts/quran"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -72,6 +122,12 @@ pub struct Settings {
     pub word_by_word: WordByWord,
     /// Saved for future audio support (7 = Mishari Rashid al-Afasy).
     pub reciter: u32,
+    /// Font set for the 15-line mushaf pages.
+    pub mushaf_font: MushafFont,
+    /// Show each page's verse translations under the page.
+    pub show_page_translation: bool,
+    /// Optional custom font base URL (e.g. a self-hosted copy); empty = defaults.
+    pub font_base_url: String,
 }
 
 impl Default for Settings {
@@ -84,6 +140,9 @@ impl Default for Settings {
             translation_font_scale: 3,
             word_by_word: WordByWord::default(),
             reciter: 7,
+            mushaf_font: MushafFont::TajweedV4,
+            show_page_translation: false,
+            font_base_url: String::new(),
         }
     }
 }
@@ -92,16 +151,38 @@ impl Settings {
     /// Query to use for every `/verses/by_*` request.
     #[allow(dead_code)] // used by the reader module
     pub fn verse_query(&self) -> quran_api::VerseQuery {
+        let strings = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         quran_api::VerseQuery {
-            language: self.locale.clone(),
+            // English only: word-by-word meanings and translations.
+            language: "en".into(),
             translations: self.translations.clone(),
             words: true,
-            fields: vec![self.script.field().into()],
-            word_fields: vec![self.script.field().into()],
-            translation_fields: vec!["resource_name".into(), "language_name".into()],
+            fields: strings(&["text_uthmani", "qpc_uthmani_hafs"]),
+            word_fields: strings(&[
+                "location",
+                "code_v2",
+                "v2_page",
+                "page_number",
+                "line_number",
+                "qpc_uthmani_hafs",
+                "text_uthmani",
+            ]),
+            translation_fields: strings(&["resource_name", "language_name"]),
             page: 1,
             per_page: 50,
+            mushaf: Some(self.mushaf_font.mushaf_id()),
         }
+    }
+
+    /// Font base URLs to try, in order (custom first).
+    pub fn font_bases(&self) -> Vec<String> {
+        let custom = self.font_base_url.trim().trim_end_matches('/');
+        let mut out: Vec<String> = Vec::new();
+        if !custom.is_empty() {
+            out.push(custom.to_string());
+        }
+        out.extend(DEFAULT_FONT_BASES.iter().map(|s| s.to_string()));
+        out
     }
 }
 

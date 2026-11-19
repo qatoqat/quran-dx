@@ -47,7 +47,7 @@ pub struct WordText {
     pub language_name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Word {
     pub id: u32,
     pub position: u16,
@@ -71,6 +71,22 @@ pub struct Word {
     pub translation: Option<WordText>,
     #[serde(default)]
     pub transliteration: Option<WordText>,
+    /// `"2:255:3"` (chapter:verse:position).
+    #[serde(default)]
+    pub location: Option<String>,
+    /// KFGQPC Hafs Unicode text (the fallback while/if a QCF page font is unavailable).
+    #[serde(default)]
+    pub qpc_uthmani_hafs: Option<String>,
+    /// QCF V1 glyph code(s) for the page font `v1_page`.
+    #[serde(default)]
+    pub code_v1: Option<String>,
+    /// QCF V2 glyph code(s); also used by the V4 tajweed fonts. Font file: `v2_page`.
+    #[serde(default)]
+    pub code_v2: Option<String>,
+    #[serde(default)]
+    pub v1_page: Option<u16>,
+    #[serde(default)]
+    pub v2_page: Option<u16>,
 }
 
 impl Word {

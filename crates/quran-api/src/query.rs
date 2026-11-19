@@ -19,6 +19,16 @@ pub struct VerseQuery {
     pub page: u32,
     /// Results per page (API max 50).
     pub per_page: u32,
+    /// Mushaf layout id for `page_number`/`line_number` (`mushaf=`), e.g. 19 = QCF V4
+    /// tajweed, 1 = QCF V2. `None` = API default.
+    pub mushaf: Option<u32>,
+}
+
+/// Mushaf ids used by the Quran.com API.
+pub mod mushaf {
+    pub const QCF_V2: u32 = 1;
+    pub const QCF_V1: u32 = 2;
+    pub const QCF_TAJWEED_V4: u32 = 19;
 }
 
 impl Default for VerseQuery {
@@ -32,6 +42,7 @@ impl Default for VerseQuery {
             translation_fields: vec!["resource_name".into(), "language_name".into()],
             page: 1,
             per_page: 50,
+            mushaf: None,
         }
     }
 }
@@ -58,6 +69,9 @@ impl VerseQuery {
         }
         if !self.translation_fields.is_empty() {
             out.push(("translation_fields", join(&self.translation_fields)));
+        }
+        if let Some(m) = self.mushaf {
+            out.push(("mushaf", m.to_string()));
         }
         out
     }

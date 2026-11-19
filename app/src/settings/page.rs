@@ -174,6 +174,7 @@ fn preview_word() -> Word {
         line_number: None,
         translation: Some(WordText { text: Some("In (the) name".into()), language_name: Some("english".into()) }),
         transliteration: Some(WordText { text: Some("bis'mi".into()), language_name: Some("english".into()) }),
+        ..Default::default()
     }
 }
 

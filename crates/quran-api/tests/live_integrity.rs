@@ -45,6 +45,7 @@ fn query(page: u32) -> VerseQuery {
         translation_fields: vec![],
         page,
         per_page: 50,
+        mushaf: None,
     }
 }
 

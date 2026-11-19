@@ -87,6 +87,7 @@ fn lists_are_comma_joined() {
         page: 3,
         per_page: 10,
         words: true,
+        mushaf: Some(19),
     };
     let pairs = q.to_pairs();
     assert_eq!(get(&pairs, "language"), Some("ur"));
@@ -99,6 +100,7 @@ fn lists_are_comma_joined() {
     assert_eq!(get(&pairs, "translation_fields"), Some("resource_name"));
     assert_eq!(get(&pairs, "page"), Some("3"));
     assert_eq!(get(&pairs, "per_page"), Some("10"));
+    assert_eq!(get(&pairs, "mushaf"), Some("19"));
     // Each key appears exactly once.
     let mut ks = keys(&pairs);
     ks.sort_unstable();
