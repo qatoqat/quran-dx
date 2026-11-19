@@ -12,13 +12,20 @@ pub fn to_json(settings: &Settings) -> String {
 }
 
 /// Parse stored JSON. Unknown fields are ignored and missing ones take defaults;
-/// malformed JSON or wrongly-typed values yield `None`. Values are normalized.
+/// malformed JSON or wrongly-typed values yield `None`, except that non-numeric
+/// entries of the `translations` array are dropped. Values are normalized.
 pub fn from_json(raw: &str) -> Option<Settings> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
     }
-    let mut settings: Settings = serde_json::from_str(raw).ok()?;
+    let mut value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    if let Some(list) = value.get_mut("translations").and_then(|t| t.as_array_mut()) {
+        // Keep only resource ids (numbers that fit a u32); their language can't be
+        // verified offline, so the settings page lets the user remove stray ones.
+        list.retain(|v| v.as_u64().is_some_and(|n| u32::try_from(n).is_ok()));
+    }
+    let mut settings: Settings = serde_json::from_value(value).ok()?;
     normalize(&mut settings);
     Some(settings)
 }
@@ -27,13 +34,36 @@ pub fn from_json(raw: &str) -> Option<Settings> {
 pub fn normalize(s: &mut Settings) {
     s.arabic_font_scale = s.arabic_font_scale.clamp(1, 10);
     s.translation_font_scale = s.translation_font_scale.clamp(1, 10);
-    let locale = s.locale.trim();
-    let valid = !locale.is_empty()
-        && locale.len() <= 16
-        && locale.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    s.locale = if valid { locale.to_string() } else { Settings::default().locale };
+    // The app is English-only: word meanings and translations are always English.
+    s.locale = "en".into();
     let mut seen = std::collections::HashSet::new();
     s.translations.retain(|id| seen.insert(*id));
+    s.font_base_url = sanitize_font_base_url(&s.font_base_url).unwrap_or_default();
+}
+
+/// Validate a custom font base URL: trimmed, and either an `http(s)://host...`
+/// URL or an absolute path (`/fonts/quran`). Characters that could break out of
+/// a CSS `url("...")` or JS string (quotes, backslashes, parentheses, whitespace,
+/// angle brackets, control characters) are rejected. Trailing `/` are removed.
+/// Returns `None` if the value is empty or not acceptable.
+pub fn sanitize_font_base_url(raw: &str) -> Option<String> {
+    let url = raw.trim().trim_end_matches('/');
+    if url.is_empty() || url.len() > 2048 {
+        return None;
+    }
+    let bad = |c: char| c.is_whitespace() || c.is_control() || "\"'\\()<>`".contains(c);
+    if url.chars().any(bad) {
+        return None;
+    }
+    let lower = url.to_ascii_lowercase();
+    let rest = lower.strip_prefix("https://").or_else(|| lower.strip_prefix("http://"));
+    let ok = match rest {
+        // Needs a host.
+        Some(rest) => !rest.is_empty() && !rest.starts_with('/'),
+        // Same-origin absolute path; `//host` (protocol-relative) is not a path.
+        None => url.starts_with('/') && !url.starts_with("//"),
+    };
+    ok.then(|| url.to_string())
 }
 
 /// Load persisted settings for the current platform.
@@ -140,20 +170,22 @@ mod desktop_backend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{QuranScript, WbwDisplay};
+    use crate::settings::{MushafFont, QuranScript, WbwDisplay};
 
     #[test]
     fn roundtrip() {
         let s = Settings {
-            locale: "ur".into(),
-            translations: vec![97, 131],
+            translations: vec![20, 131],
             script: QuranScript::IndoPak,
             arabic_font_scale: 9,
             word_by_word: crate::settings::WordByWord {
-                display: WbwDisplay::Inline,
+                display: WbwDisplay::Tooltip,
                 show_transliteration: true,
                 show_translation: false,
             },
+            mushaf_font: MushafFont::MadaniV2,
+            show_page_translation: true,
+            font_base_url: "https://fonts.example.org/quran".into(),
             ..Default::default()
         };
         assert_eq!(from_json(&to_json(&s)), Some(s));
@@ -162,7 +194,8 @@ mod tests {
     #[test]
     fn corrupt_or_empty_is_none() {
         for raw in ["", "   ", "not json", "{", "[1,2]", "null", "42", r#"{"translations": "x"}"#,
-            r#"{"script": "Klingon"}"#, r#"{"arabic_font_scale": 300}"#, "\u{0}\u{1}"]
+            r#"{"script": "Klingon"}"#, r#"{"arabic_font_scale": 300}"#, "\u{0}\u{1}",
+            r#"{"mushaf_font": "V9"}"#, r#"{"font_base_url": 7}"#, r#"{"show_page_translation": "yes"}"#]
         {
             assert_eq!(from_json(raw), None, "input: {raw:?}");
         }
@@ -170,9 +203,9 @@ mod tests {
 
     #[test]
     fn partial_uses_defaults_and_ignores_unknown() {
-        let s = from_json(r#"{"locale":"id","future_field":true,"word_by_word":{"display":"Inline"}}"#)
+        let s = from_json(r#"{"locale":"en","future_field":true,"word_by_word":{"display":"Inline"}}"#)
             .unwrap();
-        assert_eq!(s.locale, "id");
+        assert_eq!(s.locale, "en");
         assert_eq!(s.translations, Settings::default().translations);
         assert_eq!(s.word_by_word.display, WbwDisplay::Inline);
         assert!(s.word_by_word.show_translation);
@@ -211,9 +244,9 @@ mod tests {
         assert!(!path.with_file_name("settings.json.tmp").exists(), "temp file renamed away");
 
         // Overwrite existing file.
-        s.locale = "fr".into();
+        s.mushaf_font = MushafFont::MadaniV2;
         save_to_path(&path, &s).unwrap();
-        assert_eq!(load_from_path(&path).unwrap().locale, "fr");
+        assert_eq!(load_from_path(&path).unwrap().mushaf_font, MushafFont::MadaniV2);
 
         std::fs::write(&path, b"{\"locale\": ").unwrap();
         assert_eq!(load_from_path(&path), None, "corrupt file");
@@ -231,5 +264,45 @@ mod tests {
         assert_eq!(s.script, QuranScript::IndoPak);
         assert_eq!(s.word_by_word.display, WbwDisplay::Inline);
         assert_eq!(s.locale, "en");
+    }
+
+    #[test]
+    fn locale_is_forced_to_english() {
+        for raw in [r#"{"locale":"ur"}"#, r#"{"locale":"id"}"#, r#"{"locale":""}"#, r#"{"locale":"<x>"}"#] {
+            assert_eq!(from_json(raw).unwrap().locale, "en", "{raw}");
+        }
+    }
+
+    #[test]
+    fn non_numeric_translation_ids_are_dropped() {
+        let s = from_json(r#"{"translations":[131,"20",null,85,-1,1.5,{"id":3},4294967296,20,131]}"#).unwrap();
+        assert_eq!(s.translations, vec![131, 85, 20]);
+        // Not an array at all is still a type error.
+        assert_eq!(from_json(r#"{"translations":{"a":1}}"#), None);
+    }
+
+    #[test]
+    fn font_base_url_sanitized_on_load() {
+        let url = |raw: &str| {
+            let json = serde_json::json!({ "font_base_url": raw }).to_string();
+            from_json(&json).unwrap().font_base_url
+        };
+        assert_eq!(url("  https://cdn.example.org/fonts/quran/  "), "https://cdn.example.org/fonts/quran");
+        assert_eq!(url("http://localhost:8080/quran"), "http://localhost:8080/quran");
+        assert_eq!(url("HTTPS://Example.org"), "HTTPS://Example.org");
+        assert_eq!(url("/fonts/quran"), "/fonts/quran");
+        for bad in ["", "   ", "ftp://x.org", "javascript:alert(1)", "fonts/quran", "//evil.org/x", "https://",
+            "https:///path", "https://x.org/a b", "https://x.org/\")", "/a'b", "data:font/woff2;base64,AA", "/", "///"]
+        {
+            assert_eq!(url(bad), "", "input: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn sanitize_font_base_url_direct() {
+        assert_eq!(sanitize_font_base_url(" /quran// ").as_deref(), Some("/quran"));
+        assert_eq!(sanitize_font_base_url("https://a.b"), Some("https://a.b".into()));
+        assert_eq!(sanitize_font_base_url("https://a.b/<x>"), None);
+        assert_eq!(sanitize_font_base_url(&format!("https://a.b/{}", "x".repeat(3000))), None);
     }
 }
