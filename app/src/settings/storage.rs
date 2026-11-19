@@ -222,4 +222,14 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn accepts_word_check_tool_settings() {
+        // Exactly what tools/word-check/check-words.mjs writes to localStorage.
+        let json = r#"{"script":"IndoPak","word_by_word":{"show_translation":true,"show_transliteration":true,"display":"Inline"}}"#;
+        let s = from_json(json).expect("tool settings must parse");
+        assert_eq!(s.script, QuranScript::IndoPak);
+        assert_eq!(s.word_by_word.display, WbwDisplay::Inline);
+        assert_eq!(s.locale, "en");
+    }
 }

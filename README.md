@@ -70,15 +70,22 @@ Two checks need the real API, so they run on your machine:
 # 1. Data: all 6,236 verses / every word from the API (~190 requests, a few minutes)
 cargo test -p quran-api --test live_integrity -- --ignored --nocapture
 
-# 2. Screen: what the web app actually renders vs. the API, for all 114 surahs
+# 2. Screen: what the web app actually renders vs. the API
 cd app && dx serve --platform web          # in one terminal
 cd tools/word-check && npm install && npx playwright install chromium
-node check-words.mjs                        # or --chapters 1-10,18 for a subset
+node check-words.mjs                        # surahs 1-114, sample ranges, juz 1-30
+node check-words.mjs --views pages          # all 604 mushaf pages
+node check-words.mjs --script indopak --wbw inline   # other render modes
 ```
 
 The browser check compares, verse by verse, the rendered Arabic words with the API's
-`text_uthmani` words (count and text, in order) and flags missing, duplicated or fallback
-verses. It writes `report.json` and exits non-zero on any problem.
+words for the same view (count and text, in order), and flags missing, duplicated or
+fallback verses and any warning banner. The default ranges target API page boundaries
+(e.g. `2/49-51`) and multi-page ranges. It writes `report.json` and exits non-zero on any
+problem.
+
+`cargo test` also mounts every route in a virtual DOM (`app/src/mount_tests.rs`), so a
+component that panics or renders nothing fails the test suite.
 
 ## Layout
 
