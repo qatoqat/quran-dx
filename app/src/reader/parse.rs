@@ -204,6 +204,87 @@ pub fn juz_mapping<'a>(mapping: impl IntoIterator<Item = (&'a String, &'a String
     out
 }
 
+// ---------------------------------------------------------------------------
+// quran.com-style surah slugs: `/an-najm`, `/al-baqarah/255`.
+
+/// Fold a Latin letter with diacritics (as used in transliterated surah names,
+/// e.g. `ā`, `ĥ`, `ṣ`) to plain ASCII. Other characters are returned unchanged.
+fn fold_diacritic(c: char) -> char {
+    match c {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' | 'ạ' => 'a',
+        'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' | 'Ā' | 'Ă' | 'Ą' | 'Ạ' => 'a',
+        'ç' | 'ć' | 'č' | 'Ç' | 'Ć' | 'Č' => 'c',
+        'ď' | 'ḍ' | 'ḏ' | 'Ď' | 'Ḍ' | 'Ḏ' => 'd',
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' | 'È' | 'É' | 'Ê' | 'Ë' | 'Ē' => 'e',
+        'ğ' | 'ġ' | 'Ğ' | 'Ġ' => 'g',
+        'ĥ' | 'ḥ' | 'ḫ' | 'ħ' | 'Ĥ' | 'Ḥ' | 'Ḫ' | 'Ħ' => 'h',
+        'ì' | 'í' | 'î' | 'ï' | 'ī' | 'ĭ' | 'į' | 'ı' | 'Ì' | 'Í' | 'Î' | 'Ï' | 'Ī' | 'İ' => 'i',
+        'ñ' | 'ń' | 'ň' | 'Ñ' | 'Ń' | 'Ň' => 'n',
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ō' | 'ŏ' | 'ő' | 'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö' | 'Ō' => 'o',
+        'ŕ' | 'ř' | 'Ŕ' | 'Ř' => 'r',
+        'ś' | 'š' | 'ş' | 'ṣ' | 'Ś' | 'Š' | 'Ş' | 'Ṣ' => 's',
+        'ť' | 'ţ' | 'ṭ' | 'Ť' | 'Ţ' | 'Ṭ' => 't',
+        'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'Ù' | 'Ú' | 'Û' | 'Ü' | 'Ū' => 'u',
+        'ý' | 'ÿ' | 'Ý' => 'y',
+        'ź' | 'ż' | 'ž' | 'ẓ' | 'ẕ' | 'Ź' | 'Ż' | 'Ž' | 'Ẓ' => 'z',
+        _ => c,
+    }
+}
+
+/// Apostrophe-like marks dropped from slugs (`Al-Ma'idah` → `al-maidah`, like quran.com).
+fn is_apostrophe(c: char) -> bool {
+    matches!(c, '\'' | '’' | '‘' | '`' | 'ʼ' | 'ʾ' | 'ʿ' | 'ʻ' | '´')
+}
+
+/// URL slug of a transliterated surah name: lowercase ASCII, diacritics folded,
+/// apostrophes dropped, every other run of non-alphanumerics → one `-`.
+/// `"An-Najm"` → `"an-najm"`, `"Ali 'Imran"` → `"ali-imran"`, `"Al-Fātiĥah"` → `"al-fatihah"`.
+pub fn slugify(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut pending_hyphen = false;
+    for c in name.chars().map(fold_diacritic) {
+        if is_apostrophe(c) {
+            continue;
+        }
+        if c.is_ascii_alphanumeric() {
+            if pending_hyphen && !out.is_empty() {
+                out.push('-');
+            }
+            pending_hyphen = false;
+            out.push(c.to_ascii_lowercase());
+        } else {
+            pending_hyphen = true;
+        }
+    }
+    out
+}
+
+/// Slug reduced to letters and digits only, so `al-baqarah`, `albaqarah` and
+/// `al-ma-idah` (apostrophe written as a hyphen) all compare equal.
+fn slug_key(s: &str) -> String {
+    slugify(s).chars().filter(char::is_ascii_alphanumeric).collect()
+}
+
+/// Whether a URL segment could be a surah slug (has a letter; not a key like `2:255`).
+pub fn looks_like_slug(segment: &str) -> bool {
+    let s = segment.trim();
+    !s.is_empty() && s.len() <= 64 && s.chars().any(char::is_alphabetic) && !s.contains(':')
+}
+
+/// Find the chapter whose `name_simple` or `name_complex` matches `slug`
+/// (case-, diacritic-, apostrophe- and hyphen-insensitive). `names` yields
+/// `(chapter id, name_simple, name_complex)`.
+pub fn match_slug<'a>(slug: &str, names: impl IntoIterator<Item = (u16, &'a str, &'a str)>) -> Option<u16> {
+    let wanted = slug_key(slug);
+    if wanted.is_empty() {
+        return None;
+    }
+    names
+        .into_iter()
+        .find(|(_, simple, complex)| slug_key(simple) == wanted || slug_key(complex) == wanted)
+        .map(|(id, _, _)| id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +419,53 @@ mod tests {
                 (10, VerseSpan { from: 1, to: 5 }),
             ]
         );
+    }
+
+    #[test]
+    fn slugs() {
+        assert_eq!(slugify("An-Najm"), "an-najm");
+        assert_eq!(slugify("Al-Baqarah"), "al-baqarah");
+        assert_eq!(slugify("Ali 'Imran"), "ali-imran");
+        assert_eq!(slugify("Al-Ma'idah"), "al-maidah");
+        assert_eq!(slugify("Al-Fātiĥah"), "al-fatihah");
+        assert_eq!(slugify("  Ta-Ha "), "ta-ha");
+        assert_eq!(slugify("Al-Mu’minun"), "al-muminun");
+        assert!(looks_like_slug("an-najm") && looks_like_slug("Al-Baqarah"));
+        assert!(!looks_like_slug("2") && !looks_like_slug("2:255") && !looks_like_slug(""));
+    }
+
+    #[test]
+    fn slug_matching() {
+        let names = [
+            (1, "Al-Fatihah", "Al-Fātiĥah"),
+            (2, "Al-Baqarah", "Al-Baqarah"),
+            (3, "Ali 'Imran", "Āli `Imrān"),
+            (5, "Al-Ma'idah", "Al-Mā'idah"),
+            (53, "An-Najm", "An-Najm"),
+        ];
+        let m = |s: &str| match_slug(s, names.iter().copied());
+        assert_eq!(m("an-najm"), Some(53));
+        assert_eq!(m("An-Najm"), Some(53));
+        assert_eq!(m("al-baqarah"), Some(2));
+        assert_eq!(m("albaqarah"), Some(2));
+        assert_eq!(m("ali-imran"), Some(3));
+        assert_eq!(m("al-maidah"), Some(5));
+        assert_eq!(m("al-ma-idah"), Some(5));
+        assert_eq!(m("al-fatihah"), Some(1));
+        assert_eq!(m("al-f%C4%81tihah"), None);
+        assert_eq!(m("al-fātiĥah"), Some(1));
+        assert_eq!(m("nothing"), None);
+        assert_eq!(m("---"), None);
+    }
+
+    #[test]
+    fn fixture_chapter_slugs_are_unique() {
+        let list: quran_api::ChaptersResponse =
+            serde_json::from_str(include_str!("../../../crates/quran-api/tests/fixtures/chapters.json")).unwrap();
+        for c in &list.chapters {
+            let slug = slugify(&c.name_simple);
+            let names = list.chapters.iter().map(|c| (c.id, c.name_simple.as_str(), c.name_complex.as_str()));
+            assert_eq!(match_slug(&slug, names), Some(c.id), "{slug}");
+        }
     }
 }

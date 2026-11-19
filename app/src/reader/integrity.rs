@@ -5,6 +5,9 @@
 //! - (a) [`sort_dedup`]: verses sorted by (chapter, verse) and deduplicated by key.
 //! - (b) [`check_gaps`] / [`check_expected`]: verse numbers contiguous.
 //! - (c) + (d) [`word_issues`]: per-verse word structure and per-word text.
+//! - (e) [`layout_issues`]: 15-line mushaf layout data (`page_number`/`line_number`
+//!   on every word, lines 1..=15, at most 15 lines per page, lines in order, glyph
+//!   font page = layout page).
 
 use std::fmt;
 
@@ -32,6 +35,16 @@ pub enum IntegrityIssue {
     EndMarkerNotLast { verse_key: String, position: u16 },
     /// A word has no text for the selected script nor any fallback.
     EmptyWordText { verse_key: String, position: u16 },
+    /// A word has no `page_number`/`line_number`: the verse is shown as flowing text.
+    MissingLayout { verse_key: String, position: u16 },
+    /// A word's `line_number` is outside 1..=15: the verse is shown as flowing text.
+    LineOutOfRange { verse_key: String, position: u16, line: u16 },
+    /// A page would have more than 15 lines (`verse_key` starts the extra line).
+    TooManyLines { verse_key: String, page: u16 },
+    /// Lines or pages go backwards (`verse_key` is where it happens).
+    LayoutOutOfOrder { verse_key: String, page: u16 },
+    /// `v2_page` differs from `page_number`: the word is drawn as Unicode text.
+    GlyphPageMismatch { verse_key: String, position: u16 },
 }
 
 impl IntegrityIssue {
@@ -45,7 +58,12 @@ impl IntegrityIssue {
             | IntegrityIssue::MissingEndMarker { verse_key }
             | IntegrityIssue::ExtraEndMarker { verse_key, .. }
             | IntegrityIssue::EndMarkerNotLast { verse_key, .. }
-            | IntegrityIssue::EmptyWordText { verse_key, .. } => verse_key,
+            | IntegrityIssue::EmptyWordText { verse_key, .. }
+            | IntegrityIssue::MissingLayout { verse_key, .. }
+            | IntegrityIssue::LineOutOfRange { verse_key, .. }
+            | IntegrityIssue::TooManyLines { verse_key, .. }
+            | IntegrityIssue::LayoutOutOfOrder { verse_key, .. }
+            | IntegrityIssue::GlyphPageMismatch { verse_key, .. } => verse_key,
         }
     }
 
@@ -60,6 +78,22 @@ impl IntegrityIssue {
                 | IntegrityIssue::EndMarkerNotLast { .. }
                 | IntegrityIssue::EmptyWordText { .. }
         )
+    }
+
+    /// Word problems that make the verse fall back to its verse-level text
+    /// (every word issue except a single word without text).
+    pub fn is_structural_word_issue(&self) -> bool {
+        self.is_word_issue() && !matches!(self, IntegrityIssue::EmptyWordText { .. })
+    }
+
+    /// Missing/invalid line data: the verse is rendered as flowing text.
+    pub fn is_layout_issue(&self) -> bool {
+        matches!(self, IntegrityIssue::MissingLayout { .. } | IntegrityIssue::LineOutOfRange { .. })
+    }
+
+    /// The page layout looks inconsistent, but every word is still shown.
+    pub fn is_page_shape_issue(&self) -> bool {
+        matches!(self, IntegrityIssue::TooManyLines { .. } | IntegrityIssue::LayoutOutOfOrder { .. })
     }
 }
 
@@ -84,6 +118,21 @@ impl fmt::Display for IntegrityIssue {
             }
             IntegrityIssue::EmptyWordText { verse_key, position } => {
                 write!(f, "{verse_key}: word {position} has no text")
+            }
+            IntegrityIssue::MissingLayout { verse_key, position } => {
+                write!(f, "{verse_key}: word {position} has no mushaf page/line")
+            }
+            IntegrityIssue::LineOutOfRange { verse_key, position, line } => {
+                write!(f, "{verse_key}: word {position} is on line {line} (expected 1-{MUSHAF_LINES})")
+            }
+            IntegrityIssue::TooManyLines { verse_key, page } => {
+                write!(f, "{verse_key}: page {page} has more than {MUSHAF_LINES} lines")
+            }
+            IntegrityIssue::LayoutOutOfOrder { verse_key, page } => {
+                write!(f, "{verse_key}: mushaf lines out of order on page {page}")
+            }
+            IntegrityIssue::GlyphPageMismatch { verse_key, position } => {
+                write!(f, "{verse_key}: word {position} glyph page differs from its layout page")
             }
         }
     }
@@ -140,14 +189,15 @@ pub fn check_expected(verses: &[Verse], chapter: u16, expected: VerseSpan) -> Ve
 }
 
 /// Text of `word` for the script whose API field is `script_field`
-/// (`QuranScript::field()`), falling back to `text_uthmani`, then `text`.
+/// (`QuranScript::field()`), falling back to `qpc_uthmani_hafs`, `text_uthmani`, then `text`.
 pub fn word_text<'a>(word: &'a Word, script_field: &str) -> Option<&'a str> {
     let selected = match script_field {
         "text_indopak" => word.text_indopak.as_deref(),
         "text_imlaei" => word.text_imlaei.as_deref(),
+        "qpc_uthmani_hafs" => word.qpc_uthmani_hafs.as_deref(),
         _ => word.text_uthmani.as_deref(),
     };
-    [selected, word.text_uthmani.as_deref(), word.text.as_deref()]
+    [selected, word.qpc_uthmani_hafs.as_deref(), word.text_uthmani.as_deref(), word.text.as_deref()]
         .into_iter()
         .flatten()
         .find(|t| !t.trim().is_empty())
@@ -203,11 +253,6 @@ pub fn word_issues(verse: &Verse, script_field: &str) -> Vec<IntegrityIssue> {
     issues
 }
 
-/// Whether a verse's words can be rendered as-is.
-pub fn words_ok(verse: &Verse, script_field: &str) -> bool {
-    word_issues(verse, script_field).is_empty()
-}
-
 /// Number of non-end-marker words.
 pub fn word_count(verse: &Verse) -> usize {
     verse.words.iter().filter(|w| !w.is_end_marker()).count()
@@ -245,6 +290,90 @@ pub fn check_boundaries(verses: &[Verse], verses_count: impl Fn(u16) -> Option<u
     issues
 }
 
+/// Lines per page in the 15-line Madani mushaf.
+pub const MUSHAF_LINES: u16 = 15;
+
+/// Whether a verse's words are structurally complete (words present, positions
+/// 1..n in order, exactly one trailing `end` marker). Otherwise the verse is
+/// rendered from its verse-level text.
+pub fn words_structurally_ok(verse: &Verse) -> bool {
+    !word_issues(verse, "text_uthmani").iter().any(IntegrityIssue::is_structural_word_issue)
+}
+
+/// `(page, line)` of a word, if both are present and the line is 1..=15.
+pub fn word_layout(word: &Word) -> Option<(u16, u16)> {
+    match (word.page_number, word.line_number) {
+        (Some(p), Some(l)) if p >= 1 && (1..=MUSHAF_LINES).contains(&l) => Some((p, l)),
+        _ => None,
+    }
+}
+
+/// Whether every non-end word of a verse has valid line data, so the verse can
+/// be placed on its mushaf lines. (A missing `end` marker position is tolerated:
+/// it joins the line of the word before it.)
+pub fn verse_layout_ok(verse: &Verse) -> bool {
+    verse.words.iter().filter(|w| !w.is_end_marker()).all(|w| word_layout(w).is_some())
+}
+
+/// Whether the word's glyph (drawn with the `v2_page` font) belongs to the page it
+/// is laid out on. Without `v2_page` the layout page is used for the font.
+pub fn glyph_page_ok(word: &Word) -> bool {
+    match (word.v2_page, word.page_number) {
+        (Some(font_page), Some(page)) => font_page == page,
+        _ => true,
+    }
+}
+
+/// (e) Mushaf layout checks over a sorted list. Verses that already fall back to
+/// verse text (structural word issues) are skipped.
+pub fn layout_issues(verses: &[Verse]) -> Vec<IntegrityIssue> {
+    let mut issues = Vec::new();
+    // Per page: number of line runs so far; last (page, line) seen.
+    let mut runs: std::collections::HashMap<u16, u16> = std::collections::HashMap::new();
+    let mut last: Option<(u16, u16)> = None;
+    for v in verses.iter().filter(|v| words_structurally_ok(v)) {
+        let key = || v.verse_key.clone();
+        let mut placeable = true;
+        for w in v.words.iter().filter(|w| !w.is_end_marker()) {
+            match (w.page_number, w.line_number) {
+                (Some(_), Some(line)) if !(1..=MUSHAF_LINES).contains(&line) => {
+                    issues.push(IntegrityIssue::LineOutOfRange { verse_key: key(), position: w.position, line });
+                    placeable = false;
+                }
+                (Some(p), Some(_)) if p >= 1 => {}
+                _ => {
+                    issues.push(IntegrityIssue::MissingLayout { verse_key: key(), position: w.position });
+                    placeable = false;
+                }
+            }
+        }
+        for w in v.words.iter().filter(|w| !glyph_page_ok(w)) {
+            issues.push(IntegrityIssue::GlyphPageMismatch { verse_key: key(), position: w.position });
+        }
+        if !placeable {
+            continue;
+        }
+        for w in &v.words {
+            let Some((page, line)) = word_layout(w) else { continue };
+            if last == Some((page, line)) {
+                continue;
+            }
+            if let Some((lp, ll)) = last
+                && (page < lp || (page == lp && line < ll))
+            {
+                issues.push(IntegrityIssue::LayoutOutOfOrder { verse_key: key(), page });
+            }
+            let n = runs.entry(page).or_insert(0);
+            *n += 1;
+            if *n == MUSHAF_LINES + 1 {
+                issues.push(IntegrityIssue::TooManyLines { verse_key: key(), page });
+            }
+            last = Some((page, line));
+        }
+    }
+    issues
+}
+
 /// All issues for a loaded list (already sorted/deduped).
 /// `expected` lists `(chapter, span)` that must be fully present; pass it only once
 /// everything requested has been loaded.
@@ -269,6 +398,7 @@ pub fn check_all(
     for v in verses {
         issues.extend(word_issues(v, script_field));
     }
+    issues.extend(layout_issues(verses));
     issues
 }
 
@@ -291,7 +421,8 @@ mod tests {
     const U: &str = "text_uthmani";
 
     fn word(pos: u16, kind: &str, text: Option<&str>) -> serde_json::Value {
-        json!({ "id": pos, "position": pos, "char_type_name": kind, "text_uthmani": text })
+        json!({ "id": pos, "position": pos, "char_type_name": kind, "text_uthmani": text,
+                "page_number": 1, "line_number": 1 })
     }
 
     /// A well-formed verse with `n` words plus an end marker.
@@ -362,7 +493,7 @@ mod tests {
     #[test]
     fn good_verse_has_no_issues() {
         assert!(word_issues(&good("1:1"), U).is_empty());
-        assert!(words_ok(&good("1:1"), "text_indopak")); // falls back to uthmani
+        assert!(word_issues(&good("1:1"), "text_indopak").is_empty()); // falls back to uthmani
         assert_eq!(word_count(&good("1:1")), 2);
     }
 
@@ -370,7 +501,7 @@ mod tests {
     fn no_words() {
         let v = verse_with("1:1", vec![]);
         assert_eq!(word_issues(&v, U), vec![IntegrityIssue::NoWords { verse_key: "1:1".into() }]);
-        assert!(!words_ok(&v, U));
+        assert!(!words_structurally_ok(&v));
     }
 
     #[test]
@@ -484,5 +615,91 @@ mod tests {
         let keys: Vec<String> =
             check_all(&vs, U, &spans, |_| None).iter().map(|i| i.verse_key().to_string()).collect();
         assert_eq!(keys, vec!["78:39", "79:2"]);
+    }
+
+    /// A verse whose words (and end marker) sit on `(page, line)` slots.
+    fn laid_out(key: &str, slots: &[(u16, u16)]) -> Verse {
+        let n = slots.len();
+        let words: Vec<serde_json::Value> = slots
+            .iter()
+            .enumerate()
+            .map(|(i, (p, l))| {
+                let pos = i as u16 + 1;
+                let kind = if i + 1 == n { "end" } else { "word" };
+                json!({ "id": pos, "position": pos, "char_type_name": kind, "text_uthmani": "ب",
+                        "page_number": p, "line_number": l, "v2_page": p, "code_v2": "\u{fb51}" })
+            })
+            .collect();
+        verse_with(key, words)
+    }
+
+    #[test]
+    fn layout_ok_and_glyph_page() {
+        let v = laid_out("2:1", &[(2, 3), (2, 3), (2, 4)]);
+        assert!(verse_layout_ok(&v) && words_structurally_ok(&v));
+        assert!(layout_issues(&[v]).is_empty());
+        let mut v = laid_out("2:2", &[(2, 4), (2, 4)]);
+        v.words[0].v2_page = Some(3);
+        assert!(!glyph_page_ok(&v.words[0]));
+        assert_eq!(
+            layout_issues(&[v]),
+            vec![IntegrityIssue::GlyphPageMismatch { verse_key: "2:2".into(), position: 1 }]
+        );
+    }
+
+    #[test]
+    fn missing_or_invalid_line_data() {
+        let mut v = laid_out("2:1", &[(2, 3), (2, 3), (2, 4)]);
+        v.words[1].line_number = None;
+        let mut w = laid_out("2:2", &[(2, 4), (2, 4)]);
+        w.words[0].line_number = Some(16);
+        assert!(!verse_layout_ok(&v) && !verse_layout_ok(&w));
+        let issues = layout_issues(&[v, w]);
+        assert_eq!(
+            issues,
+            vec![
+                IntegrityIssue::MissingLayout { verse_key: "2:1".into(), position: 2 },
+                IntegrityIssue::LineOutOfRange { verse_key: "2:2".into(), position: 1, line: 16 },
+            ]
+        );
+        assert!(issues.iter().all(IntegrityIssue::is_layout_issue));
+        // An end marker without line data is tolerated (it joins the previous line).
+        let mut e = laid_out("2:3", &[(2, 5), (2, 5)]);
+        e.words[1].line_number = None;
+        assert!(verse_layout_ok(&e));
+        assert!(layout_issues(&[e]).is_empty());
+    }
+
+    #[test]
+    fn page_shape_checks() {
+        // 16 distinct line runs on one page (line numbers going backwards).
+        let mut vs = Vec::new();
+        for i in 0..16u16 {
+            let line = if i < 15 { i + 1 } else { 1 };
+            vs.push(laid_out(&format!("3:{}", i + 1), &[(50, line), (50, line)]));
+        }
+        let issues = layout_issues(&vs);
+        assert!(issues.contains(&IntegrityIssue::TooManyLines { verse_key: "3:16".into(), page: 50 }));
+        assert!(issues.contains(&IntegrityIssue::LayoutOutOfOrder { verse_key: "3:16".into(), page: 50 }));
+        assert!(issues.iter().all(IntegrityIssue::is_page_shape_issue));
+        // Page going backwards.
+        let vs = vec![laid_out("3:1", &[(51, 1), (51, 1)]), laid_out("3:2", &[(50, 15), (50, 15)])];
+        assert_eq!(
+            layout_issues(&vs),
+            vec![IntegrityIssue::LayoutOutOfOrder { verse_key: "3:2".into(), page: 50 }]
+        );
+        // Structurally broken verses are skipped (they fall back to verse text).
+        assert!(layout_issues(&[verse_with("3:3", vec![])]).is_empty());
+    }
+
+    #[test]
+    fn qpc_text_counts_as_word_text() {
+        let w: Word = serde_json::from_value(json!({
+            "id": 1, "position": 1, "char_type_name": "word", "qpc_uthmani_hafs": "q"
+        }))
+        .unwrap();
+        assert_eq!(word_text(&w, U), Some("q"));
+        assert!(!IntegrityIssue::EmptyWordText { verse_key: "1:1".into(), position: 1 }.is_structural_word_issue());
+        assert!(IntegrityIssue::NoWords { verse_key: "1:1".into() }.is_structural_word_issue());
     }
 }

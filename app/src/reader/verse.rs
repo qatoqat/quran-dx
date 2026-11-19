@@ -1,74 +1,13 @@
-//! Rendering of a single verse (Arabic words + translations + actions).
+//! Per-verse actions (copy verse text + translations) and plain-text helpers.
+//! (The old verse-card rendering was replaced by the mushaf view in `mushaf_view`.)
 
 use dioxus::prelude::*;
 use quran_api::Verse;
 
-use super::integrity;
-use crate::settings::wbw::{TranslationText, WordView};
-
-#[component]
-pub fn VerseView(verse: Verse) -> Element {
-    let settings = crate::settings::use_settings();
-    // Memoized so unrelated settings (e.g. font size) don't re-render every verse.
-    let script_field = use_memo(move || settings.read().script.field())();
-    let chapter = verse.chapter_number().unwrap_or(0);
-    let link =
-        crate::Route::ChapterRange { chapter: chapter.to_string(), range: verse.verse_number.to_string() };
-    let key = verse.verse_key.clone();
-
-    // Render word by word only when the words are complete; otherwise fall back
-    // to the verse-level text so no part of the verse silently disappears.
-    let use_words = integrity::words_ok(&verse, script_field);
-    let fallback_tokens: Vec<String> = if use_words {
-        Vec::new()
-    } else {
-        integrity::verse_text(&verse, script_field)
-            .map(|t| t.split_whitespace().map(str::to_string).collect())
-            .unwrap_or_default()
-    };
-    let marker = format!("\u{fd3f}{}\u{fd3e}", arabic_number(verse.verse_number));
-    let word_count = if use_words { integrity::word_count(&verse) } else { fallback_tokens.len() };
-
-    rsx! {
-        article {
-            class: if use_words { "verse" } else { "verse verse-fallback" },
-            id: "verse-{verse.verse_key}",
-            "data-verse-key": "{verse.verse_key}",
-            "data-word-count": "{word_count}",
-            "data-fallback": if !use_words { "true" },
-            div { class: "verse-meta",
-                Link { class: "verse-key", to: link, title: "Open verse {key}", "{key}" }
-                VerseActions { verse: verse.clone() }
-            }
-            div { class: "verse-arabic", dir: "rtl", lang: "ar",
-                if use_words {
-                    for w in verse.words.iter().cloned() {
-                        WordView { key: "{w.id}", word: w, verse_number: verse.verse_number }
-                    }
-                } else if fallback_tokens.is_empty() {
-                    span { class: "verse-text-missing", dir: "ltr",
-                        "The Arabic text of this verse could not be loaded."
-                    }
-                } else {
-                    for (i, t) in fallback_tokens.into_iter().enumerate() {
-                        span { key: "{i}", class: "word fallback-word", "{t} " }
-                    }
-                    span { class: "verse-number-marker", "{marker}" }
-                }
-            }
-            div { class: "verse-translations",
-                for t in verse.translations.iter().cloned() {
-                    TranslationText { key: "{t.resource_id}", translation: t }
-                }
-            }
-        }
-    }
-}
-
-/// Small row of per-verse actions. Copy uses the browser/webview clipboard via
+/// "Copy" button for a verse. Uses the browser/webview clipboard via
 /// `document::eval`, which works on web and desktop alike.
 #[component]
-fn VerseActions(verse: Verse) -> Element {
+pub(crate) fn CopyVerseButton(verse: Verse) -> Element {
     let mut copied = use_signal(|| false);
     let onclick = move |_| {
         let script = format!("const text = {};\n{}", js_string(&copy_text(&verse)), COPY_JS);
@@ -80,14 +19,12 @@ fn VerseActions(verse: Verse) -> Element {
         });
     };
     rsx! {
-        div { class: "verse-actions",
-            button {
-                class: "verse-action",
-                r#type: "button",
-                title: "Copy verse text and translations",
-                onclick,
-                if copied() { "Copied ✓" } else { "Copy" }
-            }
+        button {
+            class: "verse-action",
+            r#type: "button",
+            title: "Copy verse text and translations",
+            onclick,
+            if copied() { "Copied ✓" } else { "Copy" }
         }
     }
 }
@@ -112,14 +49,6 @@ if (navigator.clipboard && window.isSecureContext) {
   fallback();
 }
 "#;
-
-/// Arabic-Indic digits for an ayah number marker.
-fn arabic_number(n: u16) -> String {
-    n.to_string()
-        .chars()
-        .map(|c| c.to_digit(10).and_then(|d| char::from_u32(0x0660 + d)).unwrap_or(c))
-        .collect()
-}
 
 /// Encode `s` as a JavaScript string literal (JSON is a subset of JS).
 fn js_string(s: &str) -> String {
@@ -235,11 +164,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(copy_text(&verse), "a b\n\n(1:1)");
-    }
-
-    #[test]
-    fn arabic_digits() {
-        assert_eq!(arabic_number(255), "٢٥٥");
     }
 
     #[test]

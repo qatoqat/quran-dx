@@ -1,10 +1,15 @@
 //! Chapter reader: `/2`, `/2/255`, `/2/1-5`; legacy `/2:255`, `/2:1-5`,
 //! `/2:1:5`, `/2-1-5` are redirected to the canonical URL.
+//!
+//! quran.com-style slugs (`/an-najm`, `/al-baqarah/255`, `/al-baqarah/1-5`) are
+//! matched against the chapter list and redirected to the numeric URL (`/53`,
+//! `/2/255`, ...), so every view has exactly one canonical address.
 
 use dioxus::prelude::*;
 use quran_api::Chapter;
 
 use super::feed::{VerseList, VerseSource};
+use super::mushaf_layout::Trim;
 use super::parse::{self, CHAPTER_COUNT, VerseRef, VerseSpan};
 use super::{PrevNext, Redirect, SurahHeading, chapter_route, find_chapter, use_chapters, use_scroll_to_top};
 use crate::Route;
@@ -12,12 +17,42 @@ use crate::layout::{ErrorBox, Loading};
 
 #[component]
 pub fn ChapterPage(chapter: String) -> Element {
-    resolve(parse::parse_chapter_segment(&chapter), &chapter)
+    let parsed = parse::parse_chapter_segment(&chapter);
+    if parsed.is_err() && parse::looks_like_slug(&chapter) {
+        return rsx! { SlugRedirect { key: "{chapter}", slug: chapter.clone(), range: None } };
+    }
+    resolve(parsed, &chapter)
 }
 
 #[component]
 pub fn ChapterRange(chapter: String, range: String) -> Element {
+    if parse::parse_chapter_number(&chapter).is_err() && parse::looks_like_slug(&chapter) {
+        let key = format!("{chapter}/{range}");
+        return rsx! { SlugRedirect { key: "{key}", slug: chapter.clone(), range: Some(range.clone()) } };
+    }
     resolve(parse::parse_chapter_and_range(&chapter, &range), &format!("{chapter}/{range}"))
+}
+
+/// `/an-najm[/range]` → `/53[/range]` once the chapter list is known.
+#[component]
+fn SlugRedirect(slug: String, range: Option<String>) -> Element {
+    let chapters = use_chapters();
+    let list = match &*chapters.read() {
+        None => return rsx! { Loading {} },
+        Some(Err(e)) => return rsx! { ErrorBox { message: "Could not load surah information: {e}" } },
+        Some(Ok(list)) => list.clone(),
+    };
+    let names = list.iter().map(|c| (c.id, c.name_simple.as_str(), c.name_complex.as_str()));
+    match parse::match_slug(&slug, names) {
+        None => rsx! { InvalidReference { message: "No surah called “{slug}” was found." } },
+        Some(id) => {
+            let to = match range {
+                None => Route::ChapterPage { chapter: id.to_string() },
+                Some(range) => Route::ChapterRange { chapter: id.to_string(), range },
+            };
+            rsx! { Redirect { key: "{to}", to } }
+        }
+    }
 }
 
 /// Show the reference, or redirect when the URL isn't in canonical form.
@@ -81,12 +116,17 @@ fn ChapterView(chapter: u16, span: Option<VerseSpan>) -> Element {
     let full = VerseSpan { from: 1, to: info.verses_count.max(1) };
     let source = VerseSource::Chapter { chapter, span };
     let source_key = format!("{chapter}-{}", span.map(|s| s.segment()).unwrap_or_default());
-    let bismillah = info.bismillah_pre && span.is_none_or(|s| s.from == 1);
+    // A range may start/end mid-line: don't stretch those lines edge to edge.
+    let trim = Trim {
+        start: span.is_some_and(|s| s.from > 1),
+        end: span.is_some_and(|s| s.to < info.verses_count),
+    };
     let (prev, next, middle) = navigation(&info, &list, span);
 
     rsx! {
         section { class: "chapter-view",
-            SurahHeading { chapter: info.clone(), bismillah, large: true }
+            // The surah header and Bismillah lines are drawn inside the mushaf page.
+            SurahHeading { chapter: info.clone(), large: true }
             if let Some(s) = span {
                 p { class: "range-info",
                     if s.is_single() {
@@ -97,7 +137,7 @@ fn ChapterView(chapter: u16, span: Option<VerseSpan>) -> Element {
                     Link { to: chapter_route(chapter, None), "Read the full surah" }
                 }
             }
-            VerseList { key: "{source_key}", source, expected: vec![(chapter, span.unwrap_or(full))] }
+            VerseList { key: "{source_key}", source, expected: vec![(chapter, span.unwrap_or(full))], trim }
             PrevNext { prev, next, middle }
         }
     }

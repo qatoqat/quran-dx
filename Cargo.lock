@@ -4154,6 +4154,7 @@ dependencies = [
  "dirs 7.0.0",
  "gloo-timers 0.4.1",
  "quran-api",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "tokio",

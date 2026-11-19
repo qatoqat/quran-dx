@@ -34,7 +34,7 @@ fn PageView(page: u16) -> Element {
                 p { class: "view-subtitle", "of {MUSHAF_PAGES} in the Madani mushaf" }
             }
             PrevNext { prev: prev.clone(), next: next.clone() }
-            VerseList { source: VerseSource::Page(page), show_headings: true }
+            VerseList { source: VerseSource::Page(page) }
             PrevNext { prev, next }
         }
     }
@@ -80,7 +80,7 @@ fn JuzView(juz: u8) -> Element {
                 p { class: "view-subtitle", "of {JUZ_COUNT}" }
             }
             PrevNext { prev: prev.clone(), next: next.clone() }
-            VerseList { source: VerseSource::Juz(juz), show_headings: true, expected: expected() }
+            VerseList { source: VerseSource::Juz(juz), expected: expected() }
             PrevNext { prev, next }
         }
     }

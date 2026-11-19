@@ -1,4 +1,4 @@
-/* Reader styles: home (surah/juz lists), chapter/page/juz views, verse cards. */
+/* Reader styles: home (surah/juz lists), chapter/page/juz views, 15-line mushaf pages. */
 
 /* ---------- Home ---------- */
 .home-toolbar {
@@ -54,7 +54,6 @@
   margin: 2rem 0 1rem; padding: 1rem 1.2rem; border-radius: 12px; background: var(--card);
   border: 1px solid var(--border); text-align: center;
 }
-.verse-item:first-child .surah-heading { margin-top: 0; }
 .surah-heading-names { display: flex; align-items: center; justify-content: space-between; gap: 1rem; text-align: left; }
 .surah-heading h1, .surah-heading h2 { margin: 0; line-height: 1.25; }
 .surah-heading h1 { font-size: 1.6rem; }
@@ -77,33 +76,160 @@
 .view-subtitle { margin: 0; color: var(--muted); }
 .range-info { text-align: center; color: var(--muted); margin: 0 0 1rem; }
 
-/* ---------- Verses ---------- */
-.verse-list { display: flex; flex-direction: column; gap: .9rem; }
-.verse {
-  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-  padding: .9rem 1.2rem 1.1rem;
+/* ---------- Mushaf pages ---------- */
+/* Glyph size follows the Arabic size setting: scale 4 (default) ≈ quran.com's default. */
+.mushaf-pages {
+  --mushaf-size: calc(var(--arabic-size) * 1.3);
+  /* Approximate width of a full 15-line-mushaf line, in glyph em; full lines set
+     the real width (pages are as wide as their widest line). */
+  --mushaf-line-width: calc(var(--mushaf-size) * 14);
+  --quran-fallback-font: "UthmanicHafs", "KFGQPC Uthmanic Script HAFS", "Amiri Quran", serif;
+  --ornament: #b8860b;
+  margin: 1rem 0;
 }
-.verse:target { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
-.verse-meta { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-bottom: .4rem; }
+@media (prefers-color-scheme: dark) { .mushaf-pages { --ornament: #d4b25c; } }
+
+.mushaf-page {
+  margin: 0 auto 1.75rem; padding-bottom: .75rem; border-bottom: 1px solid var(--border);
+}
+/* Each page scrolls sideways on narrow screens so a mushaf line is never broken. */
+.mushaf-page-scroll { overflow-x: auto; overscroll-behavior-x: contain; padding-top: .4rem; }
+.mushaf-lines {
+  direction: rtl; width: fit-content; min-width: min(100%, var(--mushaf-line-width));
+  margin-inline: auto; font-size: var(--mushaf-size);
+}
+.mushaf-line {
+  position: relative; display: flex; flex-wrap: nowrap; align-items: baseline;
+  column-gap: .08em; white-space: nowrap; line-height: 1.9;
+}
+.mushaf-line.align-justify { justify-content: space-between; }
+.mushaf-line.align-center { justify-content: center; column-gap: .22em; }
+.mushaf-line.align-start { justify-content: flex-start; column-gap: .22em; }
+.mushaf-line.align-end { justify-content: flex-end; column-gap: .22em; }
+
+/* Words: override the generic .word style (settings.css) inside the mushaf. */
+.mushaf-lines .word {
+  display: inline-flex; flex-direction: column; align-items: center;
+  font-size: 1em; font-family: inherit; line-height: inherit; padding: 0; border-radius: 4px;
+}
+.glyph-text { font-weight: normal; font-style: normal; font-kerning: normal; }
+.unicode-text { font-family: var(--quran-fallback-font); font-size: .82em; }
+.mushaf-lines .word-missing .word-text { font-family: system-ui, sans-serif; font-size: .45em; color: var(--muted); }
+
+/* Ayah end: the font's numbered medallion, or a styled ﴿٢٥٥﴾ fallback. */
+.mushaf-lines .ayah-marker {
+  display: inline-flex; flex-direction: column; align-items: center; min-width: 0; height: auto;
+  margin: 0; padding: 0; border: 0; border-radius: 0; vertical-align: baseline;
+  font-family: inherit; font-size: 1em; line-height: inherit; color: inherit;
+}
+.ayah-text {
+  font-family: var(--quran-fallback-font); font-size: .7em; color: var(--accent);
+  padding: 0 .15em; border-radius: 999px;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 12%, transparent) 55%, transparent 60%);
+}
+.ayah-number {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; direction: ltr;
+  font-size: calc(var(--translation-size) * .7); line-height: 1.3; color: var(--muted);
+}
+
+/* Word-by-word meanings under each word (quran.com style): small and muted. */
+.wbw-inline .mushaf-line { align-items: flex-start; column-gap: .3em; line-height: 1.7; }
+.wbw-inline .mushaf-line.align-justify { justify-content: space-between; }
+.mushaf-lines .wbw-translation,
+.mushaf-lines .wbw-transliteration {
+  direction: ltr; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: calc(var(--translation-size) * .72); line-height: 1.25; color: var(--muted);
+  white-space: normal; max-width: 7.5rem; text-align: center; margin-top: -.15em;
+}
+.mushaf-lines .wbw-transliteration { font-style: italic; }
+.mushaf-lines .word-tooltip .wbw-translation,
+.mushaf-lines .word-tooltip .wbw-transliteration { color: inherit; font-size: .85rem; max-width: none; margin: 0; }
+.mushaf-lines .word.has-tooltip { cursor: pointer; }
+
+/* Verse anchors: invisible scroll/link targets at each verse's first word. */
+.verse-anchor {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%);
+  white-space: nowrap; scroll-margin-top: 5rem;
+}
+
+/* Surah header line: CSS-only ornamental frame. */
+.surah-header-line { display: flex; justify-content: center; margin: .6em 0 .35em; line-height: 1.3; }
+.surah-header-frame {
+  position: relative; display: flex; flex-direction: column; align-items: center; gap: .1rem;
+  width: min(100%, var(--mushaf-line-width)); padding: .35em 2.2em; color: var(--fg);
+  border: 3px double var(--ornament); border-radius: 6px;
+  background:
+    radial-gradient(circle at 0 50%, var(--ornament) 0 .28em, transparent .3em),
+    radial-gradient(circle at 100% 50%, var(--ornament) 0 .28em, transparent .3em),
+    linear-gradient(90deg, color-mix(in srgb, var(--ornament) 12%, transparent), transparent 25%,
+      transparent 75%, color-mix(in srgb, var(--ornament) 12%, transparent));
+}
+.surah-header-frame::before, .surah-header-frame::after {
+  content: "۞"; position: absolute; top: 50%; transform: translateY(-50%);
+  color: var(--ornament); font-size: .55em;
+}
+.surah-header-frame::before { right: .6em; }
+.surah-header-frame::after { left: .6em; }
+.surah-header-frame:hover { text-decoration: none; border-color: var(--accent); }
+.surah-header-arabic { font-family: var(--quran-fallback-font); font-size: .62em; line-height: 1.5; }
+.surah-header-latin {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; direction: ltr;
+  font-size: .9rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+}
+
+/* Bismillah line (verse 1:1's glyphs, page-1 font) with its meaning. */
+.bismillah-line { display: flex; flex-direction: column; align-items: center; margin: .1em 0 .3em; }
+.bismillah-text { display: flex; justify-content: center; gap: .18em; line-height: 1.8; white-space: nowrap; }
+.bismillah-meaning {
+  margin: 0; direction: ltr; text-align: center; color: var(--muted); line-height: 1.4;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: calc(var(--translation-size) * .8);
+}
+
+/* Verses that could not be placed on their mushaf lines. */
+.mushaf-flow {
+  margin: .4em 0; padding: .3em .5em; border: 1px dashed #e5c97a; border-radius: 8px;
+  max-width: min(100%, var(--mushaf-line-width));
+}
+.mushaf-flow-note {
+  margin: 0 0 .2rem; direction: ltr; text-align: left; font-family: system-ui, sans-serif;
+  font-size: .8rem; color: var(--muted); line-height: 1.4;
+}
+.mushaf-line.flowing { flex-wrap: wrap; justify-content: flex-start; column-gap: .25em; white-space: normal; }
+
+.mushaf-page-number {
+  margin-top: .5rem; text-align: center; font-size: .85rem; font-variant-numeric: tabular-nums;
+}
+.mushaf-page-number a {
+  display: inline-block; min-width: 2.4rem; padding: .05rem .6rem; border-radius: 999px;
+  color: var(--muted); border: 1px solid var(--border);
+}
+.mushaf-page-number a:hover { color: var(--accent); border-color: var(--accent); text-decoration: none; }
+
+/* Per-page translations (optional). */
+.page-translations {
+  margin: .9rem auto 0; max-width: 760px; font-size: var(--translation-size);
+  border-top: 1px solid var(--border);
+}
+.page-translation { padding: .6rem 0; border-bottom: 1px dashed var(--border); }
+.page-translation:last-child { border-bottom: 0; }
+.page-translation-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.page-translation .translation { margin: .3rem 0 .2rem; }
+.translation-missing { margin: .3rem 0; color: var(--muted); font-size: .9rem; }
 .verse-key {
   font-size: .85rem; font-weight: 600; font-variant-numeric: tabular-nums; padding: .1rem .55rem;
   border-radius: 999px; background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
-.verse-actions { display: flex; gap: .4rem; }
 .verse-action {
   font: inherit; font-size: .8rem; color: var(--muted); background: transparent; cursor: pointer;
   border: 1px solid var(--border); border-radius: 6px; padding: .15rem .6rem;
 }
 .verse-action:hover { color: var(--accent); border-color: var(--accent); }
+/* Used by the settings preview. */
 .verse-arabic {
   direction: rtl; text-align: right; font-family: var(--arabic-font); font-size: var(--arabic-size);
   line-height: 2.1; margin: .3rem 0 .7rem; word-spacing: .05em; overflow-wrap: anywhere;
 }
-.verse-number-marker { font-size: .8em; color: var(--accent); }
-.verse-text-missing { font-family: system-ui, sans-serif; font-size: .95rem; color: var(--muted); }
-.verse-translations { font-size: var(--translation-size); }
-.verse-translations > * + * { margin-top: .6rem; }
-.verse-translations p { margin: 0; }
 
 /* ---------- Loading more / navigation / notices ---------- */
 .load-more-wrap, .feed-error { display: flex; flex-direction: column; align-items: center; gap: .5rem; margin: 1.5rem 0; }
@@ -117,13 +243,13 @@
 .feed-progress, .feed-empty { color: var(--muted); font-size: .9rem; margin: 0; text-align: center; }
 .feed-empty { padding: 2rem 0; }
 
-.integrity-banner {
+.integrity-banner, .font-banner {
   margin: 0 0 1rem; padding: .6rem .9rem; border-radius: 8px; font-size: .88rem;
   border: 1px solid #e5c97a; background: #fff8e1; color: #6b5200;
 }
-.integrity-banner p { margin: .15rem 0; }
+.integrity-banner p, .font-banner p { margin: .15rem 0; }
 @media (prefers-color-scheme: dark) {
-  .integrity-banner { background: #2e2814; border-color: #6b5a24; color: #f0dc9c; }
+  .integrity-banner, .font-banner { background: #2e2814; border-color: #6b5a24; color: #f0dc9c; }
 }
 .link-button {
   font: inherit; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline;
@@ -148,7 +274,7 @@
   .surah-grid, .juz-grid { grid-template-columns: 1fr; }
   .surah-heading-names { flex-direction: column-reverse; text-align: center; gap: .3rem; }
   .surah-heading-meta { justify-content: center; }
-  .verse { padding: .75rem .85rem .9rem; }
+  .mushaf-pages { --mushaf-size: calc(var(--arabic-size) * .72); }
   .reader-nav { grid-template-columns: 1fr 1fr; }
   .reader-nav-slot.middle { grid-column: 1 / -1; grid-row: 2; }
   .reader-nav-btn { font-size: .85rem; }
