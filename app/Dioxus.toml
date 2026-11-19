@@ -1,0 +1,13 @@
+[application]
+name = "quran-app"
+asset_dir = "assets"
+
+[web.app]
+title = "The Noble Quran"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "assets"]
+
+[desktop.app]
+title = "The Noble Quran"

@@ -1,0 +1,26 @@
+[package]
+name = "quran-app"
+description = "Quran.com reader ported to Dioxus (web + desktop)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dioxus.workspace = true
+quran-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# web-only
+web-sys = { version = "0.3", optional = true, features = ["Window", "Storage", "Document", "Element", "HtmlElement"] }
+gloo-timers = { version = "0.4", optional = true, features = ["futures"] }
+
+# desktop-only
+dirs = { version = "7", optional = true }
+tokio = { version = "1", optional = true, features = ["time"] }
+
+[features]
+default = ["web"]
+web = ["dioxus/web", "dep:web-sys", "dep:gloo-timers"]
+desktop = ["dioxus/desktop", "dep:dirs", "dep:tokio"]
