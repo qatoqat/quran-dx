@@ -97,6 +97,9 @@ pub struct Layout {
 pub struct Trim {
     pub start: bool,
     pub end: bool,
+    /// Show only the words printed on this mushaf page (the page view): a verse
+    /// that runs over a page turn then shows just its part on this page.
+    pub page: Option<u16>,
 }
 
 impl Layout {
@@ -307,7 +310,11 @@ pub fn build_layout(verses: &[Verse], trim: Trim) -> Layout {
         let word_count = integrity::word_count(v);
         let qpc = qpc_tokens(v);
         let mut header_pending = starts_surah;
+        let mut first_shown = true;
         for (i, (w, &(page, line))) in v.words.iter().zip(&slots).enumerate() {
+            if trim.page.is_some_and(|only| only != page) {
+                continue;
+            }
             if pages.last().is_none_or(|b| b.page != Some(page)) {
                 pages.push(PageBlock { page: Some(page), items: Vec::new(), verse_keys: Vec::new() });
                 cur = None;
@@ -324,7 +331,9 @@ pub fn build_layout(verses: &[Verse], trim: Trim) -> Layout {
                 cur = Some((page, line));
             }
             let mut cell = word_cell(v, w, Some((page, line)), qpc.as_ref().map(|t| t[i]));
-            if i == 0 {
+            // The verse's anchor is on the first of its words that is shown.
+            if first_shown {
+                first_shown = false;
                 cell.anchor = Some(word_count);
                 block.verse_keys.push(v.verse_key.clone());
             }
@@ -533,6 +542,24 @@ mod tests {
     }
 
     #[test]
+    fn a_page_view_shows_only_that_pages_words() {
+        // A verse listed before the page turn, printed after it, then a verse running on to the next page.
+        let before = verse("83:34", &[(589, 1), (589, 1)]);
+        let across = verse("83:35", &[(589, 1), (589, 2), (590, 1)]);
+        let page = Trim { page: Some(589), ..Trim::default() };
+        let l = build_layout(&[before.clone(), across.clone()], page);
+        assert_eq!(l.pages.len(), 1);
+        assert_eq!(kinds(&l.pages[0]), ["L1x3", "L2x1"]);
+        assert_eq!(l.pages[0].verse_keys, ["83:34", "83:35"]);
+        // On the next page the second verse's anchor is on its first word shown there.
+        let next = build_layout(&[before, across], Trim { page: Some(590), ..Trim::default() });
+        assert_eq!(kinds(&next.pages[0]), ["L1x1"]);
+        let Item::Line { cells, .. } = &next.pages[0].items[0] else { panic!() };
+        assert!(cells[0].anchor.is_some());
+        assert_eq!(next.pages[0].verse_keys, ["83:35"]);
+    }
+
+    #[test]
     fn glyph_dropped_when_font_page_differs() {
         let mut v = verse("2:10", &[(3, 7), (3, 7)]);
         v.words[0].v2_page = Some(4);
@@ -548,14 +575,14 @@ mod tests {
         let l = build_layout(&[verse("1:2", &[(1, 3), (1, 3)])], Trim::default());
         assert!(matches!(l.pages[0].items[0], Item::Line { align: LineAlign::Center, .. }));
         let vs = vec![verse("2:255", &[(42, 4), (42, 5), (42, 9)]), verse("2:256", &[(42, 9), (42, 10)])];
-        let l = build_layout(&vs, Trim { start: true, end: true });
+        let l = build_layout(&vs, Trim { start: true, end: true, page: None });
         let aligns: Vec<LineAlign> = l.pages[0]
             .items
             .iter()
             .filter_map(|i| if let Item::Line { align, .. } = i { Some(*align) } else { None })
             .collect();
         assert_eq!(aligns, [LineAlign::End, LineAlign::Justify, LineAlign::Justify, LineAlign::Start]);
-        let l = build_layout(&[verse("2:3", &[(2, 8), (2, 8)])], Trim { start: true, end: true });
+        let l = build_layout(&[verse("2:3", &[(2, 8), (2, 8)])], Trim { start: true, end: true, page: None });
         assert!(matches!(l.pages[0].items[0], Item::Line { align: LineAlign::Center, .. }));
         assert!(is_centered_line(604, 15) && !is_centered_line(604, 1) && is_centered_line(2, 1));
     }

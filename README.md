@@ -142,12 +142,20 @@ in its ayah marker, every word must have text, and no verse in a range may be sk
 verse's word data is incomplete, the full verse text is shown instead and a warning banner
 names the verse. Words never render empty; a visible `⟨?⟩` marks text the API didn't send.
 
-Three small tables are compiled into the app as an independent reference
+Small tables are compiled into the app as an independent reference
 (`app/src/reader/reference/`, rebuilt with `python3 tools/reference/build.py`): the number
-of verses in each surah, the number of words in each of the 6,236 verses, and the verse
-each of the 604 pages begins with. A response that has lost a word, a verse at the edge
-of a page, or the end of a surah is therefore caught even when it looks consistent in
-itself. The lookups are array indexes, so they cost nothing measurable.
+of verses in each surah, of words in each of the 6,236 verses and on each of the 8,820
+lines of the 604 pages, the verses printed on each page, and the verse each of the API's
+page listings begins with. A response that has lost a word, part of a line, a verse at
+the edge of a page, or the end of a surah is therefore caught even when it looks
+consistent in itself. The lookups are array indexes, so they cost nothing measurable.
+
+A page view shows exactly the printed page: every line whole, and only that page's
+words. The API's page listings follow an older layout than the fonts, and at 25 page
+turns a verse is listed on one side but printed on the other (83:34 is listed under page
+588 and printed on line 1 of page 589); the page view fetches the neighbouring listing
+there. Note that the API's page and line numbers follow the glyph code that is requested:
+they are the fonts' layout only when `code_v2` is in `word_fields`.
 
 The app also checks what is actually on screen. Whenever a mushaf page scrolls into
 view (and has really been rendered), every word and ayah marker on it is looked up in

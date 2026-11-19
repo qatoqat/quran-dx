@@ -9,7 +9,9 @@
 //   - each word shows the right text: the QCF glyph (`code_v2`) when its page font
 //     loaded, otherwise the Unicode fallback (its token of the verse's
 //     `qpc_uthmani_hafs`, or `text_uthmani`)
-//   - each word sits on the API's mushaf page and line (15-line layout)
+//   - each word sits on the API's mushaf page and line (15-line layout); no line is
+//     wrapped or wider than its page; a page view shows exactly that page's lines,
+//     each with as many words as printed (verses listed across a page turn included)
 //   - glyph words use their own page's QCF font, and that font really contains
 //     the glyph (canvas check: inked, and different from a system-font letter)
 //   - exactly one ayah marker per verse, after its last word, with the right glyph
@@ -25,7 +27,8 @@
 //   node check-words.mjs --views pages --pages 1-604
 //   node check-words.mjs --font plain --wbw tooltip      # other render modes
 //   node check-words.mjs --base http://127.0.0.1:8080 --api https://api.quran.com/api/v4
-// Options: --views chapters,ranges,juz,pages  --chapters SPEC  --juz SPEC  --pages SPEC
+//   node check-words.mjs --views pages --browser /usr/bin/chromium --base https://example.org/quran-dx
+// Options: --views chapters,ranges,juz,pages  --chapters SPEC  --juz SPEC  --pages SPEC  --browser PATH
 //          --ranges "2/45-55,2/255"  --font tajweed|plain  --wbw inline|tooltip
 //          --allow-fallback   (don't count Unicode-fallback words as problems)
 // Exit code 0 = everything matched, 1 = problems found (see report.json).
@@ -86,7 +89,7 @@ const ENDS = new Map();
  * verse_key -> expected non-end words for an API listing:
  * [{ location, glyph, text, page, line }]
  */
-async function expectedWords(apiPath, keep = () => true) {
+async function expectedWords(apiPath, keep = () => true, countLines = false) {
   const out = new Map();
   for (let page = 1; ; page++) {
     const data = await apiGet(apiPath, {
@@ -99,6 +102,18 @@ async function expectedWords(apiPath, keep = () => true) {
       if (!keep(v)) continue;
       const end = v.words.find((w) => w.char_type_name === "end");
       ENDS.set(v.verse_key, norm(end?.code_v2 ?? ""));
+      // Where the marker sits: its own line, or its verse's last word's when the API
+      // places it earlier (84:21), which is the app's rule too.
+      const lastWord = v.words.filter((w) => w.char_type_name !== "end").at(-1);
+      const before = (a, b) => a.page_number < b.page_number || (a.page_number === b.page_number && a.line_number < b.line_number);
+      const endAt = end && lastWord && before(end, lastWord) ? lastWord : end;
+      if (countLines) {
+        for (const w of v.words) {
+          const at = w.char_type_name === "end" ? endAt : w;
+          const slot = `${at.page_number}:${at.line_number}`;
+          LINES.set(`${apiPath}|${slot}|${v.verse_key}:${w.position}`, slot);
+        }
+      }
       // The API has QPC Hafs text per verse only: one whitespace-separated token per
       // word (the last one is the ayah number), when the counts line up.
       const tokens = (v.qpc_uthmani_hafs ?? "").split(/\s+/).filter(Boolean);
@@ -111,6 +126,7 @@ async function expectedWords(apiPath, keep = () => true) {
         page: w.page_number ?? null,
         line: w.line_number ?? null,
       })));
+      out.get(v.verse_key).endPage = endAt?.page_number ?? null;
     }
     if (!data.pagination.next_page) break;
     await sleep(100);
@@ -119,6 +135,35 @@ async function expectedWords(apiPath, keep = () => true) {
 }
 
 const norm = (s) => s.normalize("NFC").replace(/\s+/g, " ").trim();
+
+/**
+ * What mushaf page `p` holds: for every verse with a word on it, the words printed
+ * on that page (a verse may run over a page turn). The API lists a few verses under
+ * the neighbouring page, so the listings of p-1, p and p+1 are read.
+ * Each entry also carries `total` (the verse's full word count), `marker` (its ayah
+ * marker is on this page) and `starts` (its first word is on this page).
+ */
+async function expectedOnPage(p) {
+  const out = new Map();
+  for (const listing of [p - 1, p, p + 1].filter((n) => n >= 1 && n <= 604)) {
+    const all = await expectedWords(`/verses/by_page/${listing}`, () => true, true);
+    for (const [key, words] of all) {
+      const here = words.filter((w) => w.page === p);
+      const marker = words.endPage === p;
+      if (!here.length && !marker) continue;
+      here.total = words.length;
+      here.marker = marker;
+      here.starts = words[0]?.page === p;
+      out.set(key, here);
+    }
+  }
+  // Mushaf order (listings were read in order, but be explicit).
+  const order = (k) => k.split(":").map(Number);
+  return new Map([...out].sort(([a], [b]) => order(a)[0] - order(b)[0] || order(a)[1] - order(b)[1]));
+}
+
+/** Words (markers included) per line of the mushaf page, from what `expectedOnPage` read. */
+const LINES = new Map();
 
 /** Load every verse of the surah in the page (clicking "Load more" as needed). */
 async function loadAll(page, expectedCount) {
@@ -237,11 +282,28 @@ async function rendered(page) {
       const next = ordered[i];
       return { chapter: Number(h.dataset.chapter), bismillah, next: next?.dataset?.location ?? null };
     });
+    // Lines: how many words each holds, whether it stays on one row, and whether it
+    // fits its page (the app never wraps or cuts a mushaf line).
+    const lines = [...document.querySelectorAll(".mushaf-line")].map((l) => {
+      const kids = [...l.children];
+      const tops = kids.map((k) => Math.round(k.getBoundingClientRect().top));
+      const box = l.getBoundingClientRect();
+      const page = l.closest(".mushaf-page")?.getBoundingClientRect();
+      const gap = parseFloat(getComputedStyle(l).columnGap) || 0;
+      const natural = kids.reduce((w, k) => w + k.getBoundingClientRect().width, 0) + gap * Math.max(0, kids.length - 1);
+      return {
+        page: Number(kids[0]?.dataset.page ?? 0),
+        line: Number(l.dataset.line),
+        words: kids.length,
+        wrapped: Math.max(...tops) - Math.min(...tops) > box.height / 2,
+        overflow: page ? Math.max(0, Math.round(natural - page.width)) : 0,
+      };
+    });
     const missingPlaceholders = document.querySelectorAll(".word.missing").length;
     // The app's own on-screen audit (render_audit.rs) marks failed words.
     const auditFailures = [...document.querySelectorAll(".word-render-error")].map((b) =>
       `${b.closest("[data-location]")?.dataset.location ?? "?"}: ${b.getAttribute("aria-label") ?? ""}`);
-    return { anchors, words, markers, headers, missingPlaceholders, auditFailures };
+    return { anchors, words, markers, headers, lines, missingPlaceholders, auditFailures };
   });
 }
 
@@ -249,6 +311,7 @@ async function checkView(page, view) {
   const problems = [];
   let fallbackWords = 0;
   const at = view.label;
+  LINES.clear();
   const expected = await view.expected();
   await page.goto(`${BASE}${view.path}`, { waitUntil: "domcontentloaded" });
   await page.waitForSelector("[data-word-count]", { timeout: LOAD_TIMEOUT_MS }).catch(() => {});
@@ -256,7 +319,26 @@ async function checkView(page, view) {
   // Give page fonts a moment so glyph mode can kick in before we read the DOM.
   await page.evaluate(() => document.fonts.ready).catch(() => {});
   await sleep(500);
-  const { anchors, words, markers, headers, missingPlaceholders, auditFailures } = await rendered(page);
+  const { anchors, words, markers, headers, lines, missingPlaceholders, auditFailures } = await rendered(page);
+  for (const l of lines) {
+    if (l.wrapped) problems.push({ at, kind: "line-wrapped", detail: `page ${l.page} line ${l.line}` });
+    if (l.overflow > 1) problems.push({ at, kind: "line-overflow", detail: `page ${l.page} line ${l.line}: ${l.overflow}px wider than its page` });
+  }
+  // A page view must show that page's lines whole: as many lines, and as many words on each, as printed.
+  if (view.mushafPage) {
+    const want = new Map();
+    for (const [k, slot] of LINES) {
+      if (!k.startsWith(`/verses/by_page/`)) continue;
+      const [pg, ln] = slot.split(":").map(Number);
+      if (pg === view.mushafPage) want.set(ln, (want.get(ln) ?? new Set()).add(k.split("|")[2]));
+    }
+    const got = new Map(lines.filter((l) => l.page === view.mushafPage).map((l) => [l.line, l.words]));
+    for (const [ln, set] of want) {
+      if (got.get(ln) !== set.size) problems.push({ at, kind: "line-word-count", detail: `line ${ln}: ${got.get(ln) ?? 0} of ${set.size} words` });
+    }
+    for (const ln of got.keys()) if (!want.has(ln)) problems.push({ at, kind: "unexpected-line", detail: `line ${ln}` });
+    if (lines.some((l) => l.page !== view.mushafPage)) problems.push({ at, kind: "other-page-shown", detail: [...new Set(lines.map((l) => l.page))].join(",") });
+  }
   for (const f of auditFailures) problems.push({ at, kind: "app-render-audit", detail: f });
   const familyFor = (p) => (FONT === "plain" ? `p${p}-v2` : `p${p}-v4`);
 
@@ -273,7 +355,8 @@ async function checkView(page, view) {
     seen.add(a.key);
     const exp = expected.get(a.key);
     if (!exp) { problems.push({ at, key: a.key, kind: "unexpected-verse" }); continue; }
-    if (a.declared !== exp.length) problems.push({ at, key: a.key, kind: "declared-count", detail: `data-word-count ${a.declared}, API ${exp.length}` });
+    const total = exp.total ?? exp.length;
+    if (a.declared !== total) problems.push({ at, key: a.key, kind: "declared-count", detail: `data-word-count ${a.declared}, API ${total}` });
   }
   for (const key of expected.keys()) if (!seen.has(key)) problems.push({ at, key, kind: "missing-verse" });
 
@@ -313,9 +396,12 @@ async function checkView(page, view) {
     if (!markersByKey.has(m.key)) markersByKey.set(m.key, []);
     markersByKey.get(m.key).push(m);
   }
-  for (const key of expected.keys()) {
+  for (const [key, exp] of expected) {
     const ms = markersByKey.get(key) ?? [];
-    if (ms.length !== 1) { problems.push({ at, key, kind: "ayah-marker-count", detail: `${ms.length} markers` }); continue; }
+    // On a page view a verse that runs on to the next page has its marker there.
+    const want = exp.marker === false ? 0 : 1;
+    if (ms.length !== want) { problems.push({ at, key, kind: "ayah-marker-count", detail: `${ms.length} markers, expected ${want}` }); continue; }
+    if (!want) continue;
     const m = ms[0];
     const got = byVerse.get(key) ?? [];
     const last = got[got.length - 1];
@@ -331,7 +417,7 @@ async function checkView(page, view) {
 
   // Surah headers: exactly for the surahs whose verse 1 is shown, directly before
   // X:1:1, with a Bismillah line except for surahs 1 and 9.
-  const startsHere = [...expected.keys()].filter((k) => k.endsWith(":1")).map((k) => Number(k.split(":")[0]));
+  const startsHere = [...expected].filter(([k, exp]) => k.endsWith(":1") && exp.starts !== false).map(([k]) => Number(k.split(":")[0]));
   for (const c of startsHere) {
     const hs = headers.filter((h) => h.chapter === c);
     if (hs.length !== 1) { problems.push({ at, kind: "surah-header-count", detail: `surah ${c}: ${hs.length} headers` }); continue; }
@@ -369,12 +455,14 @@ function buildViews() {
     for (const j of JUZ) views.push({ label: `juz ${j}`, path: `/juz/${j}`, expected: () => expectedWords(`/verses/by_juz/${j}`) });
   }
   if (VIEWS.includes("pages")) {
-    for (const p of PAGES) views.push({ label: `page ${p}`, path: `/page/${p}`, expected: () => expectedWords(`/verses/by_page/${p}`) });
+    for (const p of PAGES) views.push({ label: `page ${p}`, path: `/page/${p}`, mushafPage: p, expected: () => expectedOnPage(p) });
   }
   return views;
 }
 
-const browser = await chromium.launch();
+// --browser PATH uses an installed Chromium-based browser instead of Playwright's own download.
+// (`--disable-vivaldi` makes Vivaldi behave as plain Chromium; other browsers ignore it.)
+const browser = await chromium.launch(args.browser ? { executablePath: String(args.browser), args: ["--disable-vivaldi"] } : {});
 const context = await browser.newContext();
 // Start from known settings so rendered text compares against the matching API field.
 const settings = {

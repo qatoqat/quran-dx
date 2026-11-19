@@ -7,6 +7,7 @@
 //! - (c) + (d) [`word_issues`]: per-verse word structure and per-word text.
 //! - (f) [`reference_issues`]: each verse exists and has the number of words the
 //!   compiled-in [`reference`] tables say it has.
+//! - (g) [`line_issues`]: each mushaf line holds as many words as it is printed with.
 //! - (e) [`layout_issues`]: 15-line mushaf layout data (`page_number`/`line_number`
 //!   on every word, lines 1..=15, at most 15 lines per page, lines in order, glyph
 //!   font page = layout page).
@@ -42,6 +43,9 @@ pub enum IntegrityIssue {
     WordCount { verse_key: String, expected: usize, found: usize },
     /// A verse number beyond the end of its surah.
     UnknownVerse { verse_key: String },
+    /// A mushaf line shows `found` words (ayah markers included) but is known
+    /// to hold `expected`; `verse_key` is a verse on it, or the page's first.
+    LineWordCount { verse_key: String, page: u16, line: u16, expected: usize, found: usize },
     /// A word has no `page_number`/`line_number`: the verse is shown as flowing text.
     MissingLayout { verse_key: String, position: u16 },
     /// A word's `line_number` is outside 1..=15: the verse is shown as flowing text.
@@ -67,6 +71,7 @@ impl IntegrityIssue {
             | IntegrityIssue::EndMarkerNotLast { verse_key, .. }
             | IntegrityIssue::WordCount { verse_key, .. }
             | IntegrityIssue::UnknownVerse { verse_key }
+            | IntegrityIssue::LineWordCount { verse_key, .. }
             | IntegrityIssue::EmptyWordText { verse_key, .. }
             | IntegrityIssue::MissingLayout { verse_key, .. }
             | IntegrityIssue::LineOutOfRange { verse_key, .. }
@@ -133,6 +138,9 @@ impl fmt::Display for IntegrityIssue {
                 write!(f, "{verse_key}: {found} words instead of {expected}")
             }
             IntegrityIssue::UnknownVerse { verse_key } => write!(f, "{verse_key}: no such verse"),
+            IntegrityIssue::LineWordCount { page, line, expected, found, .. } => {
+                write!(f, "page {page} line {line}: {found} of {expected} words")
+            }
             IntegrityIssue::MissingLayout { verse_key, position } => {
                 write!(f, "{verse_key}: word {position} has no mushaf page/line")
             }
@@ -291,6 +299,68 @@ pub fn reference_issues(verse: &Verse) -> Vec<IntegrityIssue> {
             vec![IntegrityIssue::WordCount { verse_key: verse.verse_key.clone(), expected, found }]
         }
         Some(_) => Vec::new(),
+    }
+}
+
+/// (g) Lines against the compiled-in reference: a mushaf line must hold as many
+/// words as it is printed with. This is what notices a line that is only
+/// partly there, for example at a page turn where the API lists a verse on the
+/// other side.
+///
+/// `whole_page`: the view is that one mushaf page, so all of its lines must be
+/// there and complete, and words on other pages are not shown. Otherwise the
+/// first and the last line of what is loaded may be cut (a range, or more still
+/// to load) and only the lines between them are checked. Call it for a whole
+/// page only once everything has loaded.
+pub fn line_issues(verses: &[Verse], whole_page: Option<u16>) -> Vec<IntegrityIssue> {
+    #[cfg(test)]
+    if !CHECK_REFERENCE.get() {
+        return Vec::new();
+    }
+    // Verses shown as flowing text are not on their lines; other checks report them.
+    if verses.iter().any(|v| !words_structurally_ok(v) || !verse_layout_ok(v)) {
+        return Vec::new();
+    }
+    // Lines in reading order: ((page, line), words on it, a verse on it).
+    let mut lines: Vec<((u16, u16), usize, &str)> = Vec::new();
+    for v in verses {
+        let mut prev = None;
+        for w in &v.words {
+            let Some(slot) = slot_after(prev, w) else { continue };
+            prev = Some(slot);
+            if whole_page.is_some_and(|p| p != slot.0) {
+                continue;
+            }
+            match lines.last_mut() {
+                Some((last, count, _)) if *last == slot => *count += 1,
+                _ => lines.push((slot, 1, &v.verse_key)),
+            }
+        }
+    }
+    let issue = |(page, line): (u16, u16), found: usize, verse_key: &str| {
+        let expected = reference::words_on_line(page, line)?;
+        (expected != found).then(|| IntegrityIssue::LineWordCount {
+            verse_key: verse_key.to_string(),
+            page,
+            line,
+            expected,
+            found,
+        })
+    };
+    match whole_page {
+        Some(page) => {
+            let first_key = lines.first().map_or("", |l| l.2);
+            (1..=MUSHAF_LINES)
+                .filter_map(|line| match lines.iter().find(|l| l.0 == (page, line)) {
+                    Some(&(slot, found, key)) => issue(slot, found, key),
+                    None => issue((page, line), 0, first_key),
+                })
+                .collect()
+        }
+        None if lines.len() > 2 => {
+            lines[1..lines.len() - 1].iter().filter_map(|&(slot, found, key)| issue(slot, found, key)).collect()
+        }
+        None => Vec::new(),
     }
 }
 
@@ -789,6 +859,58 @@ mod tests {
             .map(|p| serde_json::json!({ "id": p, "position": p, "char_type_name": "word", "text_uthmani": "x", "page_number": 1, "line_number": 2 }))
             .collect();
         words.push(serde_json::json!({ "id": 99, "position": n + 1, "char_type_name": "end", "text_uthmani": "١", "page_number": 1, "line_number": 2 }));
+        serde_json::from_value(serde_json::json!({ "id": 1, "verse_number": number, "verse_key": key, "words": words })).unwrap()
+    }
+
+    #[test]
+    fn lines_are_counted_against_the_reference() {
+        CHECK_REFERENCE.set(true);
+        // Page 1 as printed: lines 2..=8, Al-Fatihah's seven verses.
+        let per_line: Vec<(u16, usize)> = (1..=15).filter_map(|l| Some((l, reference::words_on_line(1, l)?))).filter(|l| l.1 > 0).collect();
+        assert_eq!(per_line.iter().map(|l| l.1).sum::<usize>(), 36);
+        // One verse per line count: build verses whose words fill each line exactly.
+        let mut verses = Vec::new();
+        let mut line_iter = per_line.iter().flat_map(|(l, n)| std::iter::repeat_n(*l, *n));
+        for n in 1..=7u16 {
+            let words = reference::words_in(1, n).unwrap() + 1;
+            let slots: Vec<(u16, u16)> = line_iter.by_ref().take(words).map(|l| (1, l)).collect();
+            verses.push(placed(&format!("1:{n}"), &slots));
+        }
+        assert_eq!(line_issues(&verses, Some(1)), [], "the whole page is there");
+        assert_eq!(line_issues(&verses, None), []);
+        // Without its last verse the page lacks words on its last lines.
+        let short = &verses[..6];
+        let issues = line_issues(short, Some(1));
+        assert!(!issues.is_empty(), "a page with a verse missing must be reported");
+        assert!(issues.iter().all(|i| matches!(i, IntegrityIssue::LineWordCount { page: 1, .. })));
+        assert!(issues[0].to_string().starts_with("page 1 line "), "{}", issues[0]);
+        // The same six verses as a range: the cut last line is an edge and is not counted.
+        assert!(line_issues(short, None).iter().all(|i| !matches!(i, IntegrityIssue::LineWordCount { line: 8, .. })));
+        // A word that sits on the wrong line in the middle of a page is noticed in any view.
+        let mut moved = verses.clone();
+        let before = moved[2].words.last().unwrap().line_number;
+        let after = moved[4].words[0].line_number;
+        if moved[3].words[0].line_number != before {
+            moved[3].words[0].line_number = before;
+        } else {
+            moved[3].words.last_mut().unwrap().line_number = after;
+        }
+        assert!(line_issues(&moved, None).iter().any(|i| matches!(i, IntegrityIssue::LineWordCount { .. })));
+        CHECK_REFERENCE.set(false);
+    }
+
+    /// A verse whose words (the last one its marker) sit on the given `(page, line)` slots.
+    fn placed(key: &str, slots: &[(u16, u16)]) -> Verse {
+        let number: u16 = key.split(':').nth(1).unwrap().parse().unwrap();
+        let last = slots.len() - 1;
+        let words: Vec<serde_json::Value> = slots
+            .iter()
+            .enumerate()
+            .map(|(i, (page, line))| serde_json::json!({
+                "id": i, "position": i + 1, "char_type_name": if i == last { "end" } else { "word" },
+                "text_uthmani": "x", "page_number": page, "line_number": line
+            }))
+            .collect();
         serde_json::from_value(serde_json::json!({ "id": 1, "verse_number": number, "verse_key": key, "words": words })).unwrap()
     }
 }

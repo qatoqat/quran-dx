@@ -37,17 +37,31 @@ impl VerseSource {
         }
     }
 
-    /// Last API page worth fetching, when known up front.
+    /// Last request worth making, when known up front. For a mushaf page the
+    /// requests are its listings (see `reference::listings_for_page`), one each.
     fn last_api_page(self) -> Option<u32> {
         match self {
             VerseSource::Chapter { span: Some(s), .. } => Some(*api_pages_for(s, PER_PAGE).end()),
+            VerseSource::Page(p) => Some(reference::listings_for_page(p).len().max(1) as u32),
             _ => None,
+        }
+    }
+
+    /// The request after `page`, given what the API says comes next.
+    fn next_api_page(self, page: u32, api_next: Option<u32>) -> Option<u32> {
+        match self {
+            VerseSource::Page(_) => Some(page + 1).filter(|n| Some(*n) <= self.last_api_page()),
+            _ => next_page_within(api_next, self.last_api_page()).filter(|n| *n > page),
         }
     }
 
     fn includes(self, verse: &Verse) -> bool {
         match self {
             VerseSource::Chapter { span: Some(s), .. } => s.contains(verse.verse_number),
+            // A neighbouring listing is fetched for the verses printed on this page only.
+            VerseSource::Page(p) => verse.chapter_number().is_some_and(|c| {
+                reference::verses_on_page(p).iter().any(|(chapter, span)| *chapter == c && span.contains(verse.verse_number))
+            }),
             _ => true,
         }
     }
@@ -55,7 +69,19 @@ impl VerseSource {
     async fn fetch(self, client: &Client, q: &VerseQuery) -> Result<VersesResponse, quran_api::Error> {
         match self {
             VerseSource::Chapter { chapter, .. } => client.verses_by_chapter(chapter, q).await,
-            VerseSource::Page(p) => client.verses_by_page(p, q).await,
+            VerseSource::Page(p) => {
+                // Request `q.page` of a mushaf page is its `q.page`-th listing, which fits one API page.
+                let listings = reference::listings_for_page(p);
+                let listing = listings.get(q.page as usize - 1).copied().unwrap_or(p);
+                let response = client.verses_by_page(listing, &q.with_page(1)).await?;
+                if response.pagination.next_page.is_some() {
+                    return Err(quran_api::Error::Status {
+                        status: 0,
+                        body: format!("the listing of page {listing} has more verses than one request returns"),
+                    });
+                }
+                Ok(response)
+            }
             VerseSource::Juz(j) => client.verses_by_juz(j, q).await,
         }
     }
@@ -118,9 +144,8 @@ impl VerseFeed {
             self.loading.set(false);
             match result {
                 Ok(resp) => {
-                    let next = next_page_within(resp.pagination.next_page, source.last_api_page())
-                        // Guard against an API that keeps returning the same page.
-                        .filter(|n| *n > page && !resp.verses.is_empty());
+                    // Guard against an API that keeps returning the same page.
+                    let next = source.next_api_page(page, resp.pagination.next_page).filter(|_| !resp.verses.is_empty());
                     if source.last_api_page().is_none() {
                         self.total.set(Some(resp.pagination.total_records));
                     }
@@ -133,6 +158,11 @@ impl VerseFeed {
                         self.merge_issues.write().extend(issues);
                     }
                     self.next_page.set(next);
+                    // A mushaf page is one unit: fetch its other listing right away
+                    // rather than when the reader scrolls to the end.
+                    if next.is_some() && matches!(source, VerseSource::Page(_)) {
+                        self.load_more();
+                    }
                 }
                 Err(e) => self.error.set(Some(e.to_string())),
             }
@@ -247,7 +277,15 @@ pub(crate) fn VerseList(
         let expected_spans = expected.read();
         let expected: &[(u16, VerseSpan)] = if complete { &expected_spans } else { &[] };
         let mut issues = feed.merge_issues.read().clone();
-        issues.extend(integrity::check_all(&feed.verses.read(), script_field, expected, reference::verses_in));
+        let verses = feed.verses.read();
+        issues.extend(integrity::check_all(&verses, script_field, expected, reference::verses_in));
+        // Lines: a mushaf page must be whole once it has loaded; elsewhere every
+        // line between the first and the last one loaded.
+        match source() {
+            VerseSource::Page(p) if complete => issues.extend(integrity::line_issues(&verses, Some(p))),
+            VerseSource::Page(_) => {}
+            _ => issues.extend(integrity::line_issues(&verses, None)),
+        }
         issues
     });
     use_effect(move || {
@@ -284,9 +322,14 @@ pub(crate) fn VerseList(
         integrity::keys_where(&issues_now, |i| matches!(i, IntegrityIssue::GlyphPageMismatch { .. }));
     let missing_keys = integrity::keys_where(&issues_now, |i| matches!(i, IntegrityIssue::MissingVerse { .. }));
     let unknown_keys = integrity::keys_where(&issues_now, |i| matches!(i, IntegrityIssue::UnknownVerse { .. }));
+    let short_lines: Vec<String> = issues_now
+        .iter()
+        .filter(|i| matches!(i, IntegrityIssue::LineWordCount { .. }))
+        .map(ToString::to_string)
+        .collect();
     drop(issues_now);
     let any_issue =
-        [&fallback_keys, &empty_word_keys, &layout_keys, &shape_keys, &glyph_keys, &missing_keys, &unknown_keys]
+        [&fallback_keys, &empty_word_keys, &layout_keys, &shape_keys, &glyph_keys, &missing_keys, &unknown_keys, &short_lines]
         .iter()
         .any(|k| !k.is_empty());
 
@@ -327,6 +370,19 @@ pub(crate) fn VerseList(
                     p {
                         "Some words are shown as Unicode text because their glyph font page did not match: "
                         {key_list(&glyph_keys)}
+                    }
+                }
+                if !short_lines.is_empty() {
+                    p {
+                        "Some mushaf lines do not have all their words: "
+                        {key_list(&short_lines)}
+                        " "
+                        button {
+                            class: "link-button",
+                            r#type: "button",
+                            onclick: move |_| feed.reset(),
+                            "Reload"
+                        }
                     }
                 }
                 if !unknown_keys.is_empty() {
@@ -416,6 +472,24 @@ mod tests {
         assert!(!s.includes(&verse("2:119")) && !s.includes(&verse("2:161")));
         let whole = VerseSource::Chapter { chapter: 2, span: None };
         assert_eq!((whole.first_api_page(), whole.last_api_page()), (1, None));
-        assert_eq!((VerseSource::Juz(30).first_api_page(), VerseSource::Page(3).last_api_page()), (1, None));
+        assert_eq!((VerseSource::Juz(30).first_api_page(), VerseSource::Juz(30).last_api_page()), (1, None));
+        assert_eq!(VerseSource::Juz(30).next_api_page(1, Some(2)), Some(2));
+        assert_eq!(VerseSource::Juz(30).next_api_page(2, Some(2)), None, "an API that repeats a page is not followed");
+    }
+
+    #[test]
+    fn a_mushaf_page_is_loaded_from_its_listings() {
+        // An ordinary page: its own listing, one request.
+        let page = VerseSource::Page(3);
+        assert_eq!((page.first_api_page(), page.last_api_page()), (1, Some(1)));
+        assert_eq!(page.next_api_page(1, None), None);
+        // 83:34 is printed on page 589 but listed under 588: two requests, and of
+        // the first listing only that verse belongs to the page.
+        let turn = VerseSource::Page(589);
+        assert_eq!(turn.last_api_page(), Some(2));
+        assert_eq!((turn.next_api_page(1, None), turn.next_api_page(2, None)), (Some(2), None));
+        assert!(turn.includes(&verse("83:34")) && turn.includes(&verse("84:24")));
+        // 83:33 is on page 588; 84:25 is in this page's listing but printed on page 590.
+        assert!(!turn.includes(&verse("83:33")) && !turn.includes(&verse("84:25")));
     }
 }

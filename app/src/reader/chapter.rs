@@ -120,6 +120,7 @@ fn ChapterView(chapter: u16, span: Option<VerseSpan>, at: Anchor) -> Element {
     let trim = Trim {
         start: span.is_some_and(|s| s.from > 1),
         end: span.is_some_and(|s| s.to < info.verses_count),
+        page: None,
     };
     let (prev, next, middle) = navigation(&info, &list, span);
 

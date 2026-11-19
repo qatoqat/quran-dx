@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 
 use super::feed::{VerseList, VerseSource};
+use super::mushaf_layout::Trim;
 use super::parse::{JUZ_COUNT, MUSHAF_PAGES, valid_juz, valid_mushaf_page};
 use super::{PrevNext, reference, use_juzs, use_scroll_to_top};
 use crate::Route;
@@ -31,8 +32,15 @@ fn PageView(page: u16, at: Anchor) -> Element {
     rsx! {
         document::Title { "Page {page} – The Noble Quran" }
         PrevNext { prev: prev.clone(), next: next.clone() }
-        // Every verse that begins on the page must arrive, including its first and last.
-        VerseList { source: VerseSource::Page(page), expected: reference::verses_on_page(page), start: at }
+        // Exactly the printed page: every verse with a word on it must arrive (a verse
+        // listed across the page turn comes from the neighbouring listing), and only
+        // the words printed on this page are shown.
+        VerseList {
+            source: VerseSource::Page(page),
+            expected: reference::verses_on_page(page),
+            trim: Trim { page: Some(page), ..Trim::default() },
+            start: at,
+        }
         PrevNext { prev, next }
     }
 }
