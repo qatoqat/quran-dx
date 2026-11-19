@@ -38,12 +38,23 @@ pub fn normalize(s: &mut Settings) {
 
 /// Load persisted settings for the current platform.
 pub fn load() -> Option<Settings> {
-    backend::load()
+    // Chosen by build target, not just features: a desktop build may still have the
+    // `web` feature enabled, and web-sys calls panic on native targets.
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    return web_backend::load();
+    #[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
+    return desktop_backend::load();
+    #[allow(unreachable_code)]
+    None
 }
 
 /// Persist settings for the current platform. Failures are silently ignored.
 pub fn save(settings: &Settings) {
-    backend::save(settings);
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    web_backend::save(settings);
+    #[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
+    desktop_backend::save(settings);
+    let _ = settings;
 }
 
 /// Read settings from a JSON file. Missing/unreadable/corrupt file → `None`.
@@ -77,8 +88,10 @@ pub fn save_to_path(path: &std::path::Path, settings: &Settings) -> std::io::Res
     result
 }
 
+/// Compiled whenever `web` is on (so it is type-checked on native too), used only on wasm32.
 #[cfg(feature = "web")]
-mod backend {
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+mod web_backend {
     use super::Settings;
 
     /// localStorage key.
@@ -102,8 +115,8 @@ mod backend {
     }
 }
 
-#[cfg(all(feature = "desktop", not(feature = "web")))]
-mod backend {
+#[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
+mod desktop_backend {
     use super::Settings;
     use std::path::PathBuf;
 
@@ -122,15 +135,6 @@ mod backend {
             let _ = super::save_to_path(&path, settings);
         }
     }
-}
-
-#[cfg(not(any(feature = "web", feature = "desktop")))]
-mod backend {
-    use super::Settings;
-    pub fn load() -> Option<Settings> {
-        None
-    }
-    pub fn save(_settings: &Settings) {}
 }
 
 #[cfg(test)]
