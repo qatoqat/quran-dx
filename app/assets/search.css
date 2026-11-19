@@ -1,1 +1,113 @@
-/* search styles */
+/* Search: header combobox + dropdown, and the /search results page.
+   Colors come from main.css variables so light/dark mode both work. */
+
+/* ---------- Header search box ---------- */
+.search-box { position: relative; width: 100%; }
+.search-input {
+  width: 100%; padding: .45rem .8rem; font: inherit; font-size: .95rem;
+  color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 999px;
+  outline: none; transition: border-color .15s, box-shadow .15s;
+}
+.search-input::placeholder { color: var(--muted); }
+.search-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.search-dropdown {
+  position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 20;
+  max-height: min(70vh, 32rem); overflow-y: auto;
+  background: var(--card); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .18);
+  padding: .3rem 0;
+}
+.search-options { list-style: none; margin: 0; padding: 0; }
+.search-group {
+  padding: .45rem .9rem .2rem; font-size: .72rem; font-weight: 600;
+  letter-spacing: .05em; text-transform: uppercase; color: var(--muted);
+}
+.search-option {
+  display: flex; gap: .7rem; align-items: flex-start;
+  padding: .5rem .9rem; cursor: pointer;
+}
+.search-option.active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.search-option-text { display: flex; flex-direction: column; gap: .15rem; min-width: 0; flex: 1; }
+.search-option-arabic {
+  font-family: var(--arabic-font); font-size: 1.25rem; line-height: 1.9;
+  text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.search-option-translation {
+  font-size: .85rem; color: var(--muted);
+  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.search-status { padding: .5rem .9rem; font-size: .85rem; color: var(--muted); }
+.search-status-error { color: #c0392b; }
+@media (prefers-color-scheme: dark) { .search-status-error { color: #f08a7e; } }
+
+/* ---------- Shared pieces ---------- */
+.search-badge {
+  flex: none; display: inline-block; min-width: 3.2rem; padding: .1rem .5rem;
+  font-size: .78rem; font-weight: 600; text-align: center; white-space: nowrap;
+  color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 6px; line-height: 1.6;
+}
+.search-badge-all { color: var(--muted); border-color: var(--border); }
+mark.search-hit {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: inherit; border-radius: 3px; padding: 0 .1em;
+}
+
+/* ---------- Results page ---------- */
+.search-page { display: flex; flex-direction: column; gap: 1rem; }
+.search-title { margin: 0; font-size: 1.5rem; overflow-wrap: anywhere; }
+
+.search-jump {
+  padding: .8rem 1rem; background: var(--card);
+  border: 1px solid var(--border); border-radius: 10px;
+}
+.search-jump h2 {
+  margin: 0 0 .5rem; font-size: .8rem; font-weight: 600; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--muted);
+}
+.search-jump ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .4rem; }
+.search-jump a { display: inline-flex; gap: .6rem; align-items: center; color: var(--fg); }
+.search-jump a:hover span:last-child { color: var(--accent); }
+
+.search-count { margin: 0; color: var(--muted); font-size: .9rem; }
+.search-empty { padding: 2rem 1rem; text-align: center; color: var(--muted); }
+.search-empty p { margin: .3rem 0; }
+.search-hint { font-size: .9rem; }
+
+.search-results { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1rem; }
+.search-results.pending { opacity: .55; transition: opacity .2s; }
+.search-result {
+  padding: 1rem 1.2rem; background: var(--card);
+  border: 1px solid var(--border); border-radius: 10px;
+}
+.search-result-head { display: flex; align-items: center; gap: .6rem; margin-bottom: .4rem; }
+.search-result-head a.search-badge:hover { text-decoration: none; background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.search-arabic {
+  font-family: var(--arabic-font); font-size: var(--arabic-size); line-height: 2.1;
+  text-align: right; margin: .3rem 0 .6rem;
+}
+.search-translation { border-top: 1px dashed var(--border); padding-top: .5rem; margin-top: .5rem; }
+.search-translation p { margin: 0; font-size: var(--translation-size); }
+.search-translation-name { color: var(--muted); font-size: .8rem !important; margin-top: .2rem !important; }
+
+.search-pagination {
+  display: flex; align-items: center; justify-content: center; gap: 1rem; padding: .5rem 0 1rem;
+}
+.search-pagination button {
+  font: inherit; font-size: .9rem; padding: .4rem 1rem; cursor: pointer;
+  color: var(--fg); background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+}
+.search-pagination button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.search-pagination button:disabled { opacity: .45; cursor: default; }
+.search-page-number { color: var(--muted); font-size: .9rem; }
+
+@media (max-width: 640px) {
+  .search-dropdown { position: fixed; left: .5rem; right: .5rem; top: 3.4rem; }
+  .search-arabic { font-size: calc(var(--arabic-size) * .85); }
+}
