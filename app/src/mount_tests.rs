@@ -19,6 +19,21 @@ struct HarnessProps {
     api: String,
 }
 
+/// Test-only client-side navigation: set this and the app shell pushes the route
+/// through the real router (like clicking a link), without remounting the app.
+pub(crate) static TEST_NAV: GlobalSignal<Option<String>> = Signal::global(|| None);
+
+/// Called from `Shell` in test builds only.
+pub(crate) fn use_test_navigation() {
+    use_effect(|| {
+        if let Some(path) = TEST_NAV.read().clone()
+            && let Ok(route) = path.parse::<Route>()
+        {
+            navigator().push(route);
+        }
+    });
+}
+
 const UNREACHABLE: &str = "http://127.0.0.1:9/unreachable";
 
 #[allow(non_snake_case)]
@@ -195,13 +210,19 @@ fn fake_api() -> String {
             let path = req.split_whitespace().nth(1).unwrap_or("").split('?').next().unwrap_or("").to_string();
             let body = match path.as_str() {
                 // 114:1-3 (header + Bismillah before 114:1), lines 11-13.
-                "/verses/by_page/604" | "/verses/by_chapter/114" => verses_response(vec![
+                "/juzs" => serde_json::json!({ "juzs": [
+                    { "id": 29, "juz_number": 29, "verse_mapping": { "67": "1-1" } },
+                    { "id": 30, "juz_number": 30, "verse_mapping": { "114": "1-3" } },
+                ]})
+                .to_string(),
+                "/verses/by_juz/29" => verses_response(vec![verse_json(67, 1, 2, 562, 3)]),
+                "/verses/by_page/604" | "/verses/by_chapter/114" | "/verses/by_juz/30" => verses_response(vec![
                     verse_json(114, 1, 3, 604, 11),
                     verse_json(114, 2, 2, 604, 12),
                     verse_json(114, 3, 2, 604, 13),
                 ]),
                 // 2:5's second word has no line data → flowing block + banner.
-                "/verses/by_page/2" => {
+                "/verses/by_page/2" | "/verses/by_chapter/2" => {
                     let mut broken = verse_json(2, 5, 3, 2, 14);
                     broken["words"][1]["line_number"] = serde_json::Value::Null;
                     verses_response(vec![verse_json(2, 4, 2, 2, 13), broken])
@@ -304,4 +325,55 @@ async fn surah_slugs_redirect_to_numeric_urls() {
     assert!(html.contains("Verses 2–3"), "{html}");
     let html = render_settled_with("/no-such-surah", &api, 20).await;
     assert!(html.contains("No surah called"), "{html}");
+}
+
+async fn settle(dom: &mut VirtualDom) {
+    for _ in 0..40 {
+        if tokio::time::timeout(std::time::Duration::from_millis(50), dom.wait_for_work()).await.is_err() {
+            continue;
+        }
+        dom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+    }
+}
+
+/// Mount `from`, let it load, then navigate client-side to `to` (same app, same
+/// components, like following a link) and let that load too.
+async fn navigate_settled(from: &str, to: &str, api: &str) -> String {
+    let mut dom = VirtualDom::new_with_props(Harness, HarnessProps { path: from.to_string(), api: api.into() });
+    dom.rebuild_in_place();
+    settle(&mut dom).await;
+    dom.in_runtime(|| *TEST_NAV.write() = Some(to.to_string()));
+    settle(&mut dom).await;
+    dioxus_ssr::render(&dom)
+}
+
+/// Regression: navigating between two views of the same kind (page→page,
+/// surah→surah, juz→juz) must load the NEW content, not keep the old verses.
+#[tokio::test(flavor = "current_thread")]
+async fn client_side_navigation_loads_the_new_page() {
+    let api = fake_api();
+    let html = navigate_settled("/page/2", "/page/604", &api).await;
+    assert!(html.contains("Page 604"), "{html}");
+    assert!(html.contains(r#"data-location="114:1:1""#), "page 604's verses not shown after navigation:\n{html}");
+    assert!(!html.contains(r#"data-location="2:4:1""#), "page 2's verses still shown on page 604:\n{html}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_side_navigation_between_surahs() {
+    let api = fake_api();
+    let html = navigate_settled("/2", "/114", &api).await;
+    assert!(html.contains(r#"data-location="114:1:1""#), "surah 114 not shown after navigation:\n{html}");
+    assert!(!html.contains(r#"data-location="2:4:1""#), "surah 2 still shown:\n{html}");
+}
+
+/// Juz → juz: the juz's expected verse ranges must follow the new juz (stale
+/// ranges would raise a false "verses missing" warning for the old juz).
+#[tokio::test(flavor = "current_thread")]
+async fn client_side_navigation_between_juz() {
+    let api = fake_api();
+    let html = navigate_settled("/juz/29", "/juz/30", &api).await;
+    assert!(html.contains("Juz 30"), "{html}");
+    assert!(html.contains(r#"data-location="114:1:1""#), "juz 30 not shown:\n{html}");
+    assert!(!html.contains(r#"data-location="67:1:1""#), "juz 29 still shown:\n{html}");
+    assert!(!html.contains("missing from the server response"), "false missing-verse warning:\n{html}");
 }

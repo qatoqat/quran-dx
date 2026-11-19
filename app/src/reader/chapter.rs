@@ -82,7 +82,7 @@ fn InvalidReference(message: String) -> Element {
 
 #[component]
 fn ChapterView(chapter: u16, span: Option<VerseSpan>) -> Element {
-    use_scroll_to_top();
+    use_scroll_to_top((chapter, span));
     let chapters = use_chapters();
     let list = match &*chapters.read() {
         None => return rsx! { Loading {} },

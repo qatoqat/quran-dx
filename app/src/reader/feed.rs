@@ -59,7 +59,12 @@ impl VerseSource {
 /// Reactive state of a verse feed. `Copy`, so it can move into handlers freely.
 #[derive(Clone, Copy)]
 struct VerseFeed {
-    source: VerseSource,
+    /// Reactive: when the view navigates to another page/surah/juz the component
+    /// is reused with a new `source` prop, and the feed must reload for it.
+    source: Memo<VerseSource>,
+    /// The source the current `verses` belong to (set on reset). Until it matches
+    /// `source`, the list shows "loading" and reports no integrity issues.
+    loaded_for: Signal<Option<VerseSource>>,
     client: Signal<Client>,
     query: Memo<VerseQuery>,
     verses: Signal<Vec<Verse>>,
@@ -78,7 +83,9 @@ impl VerseFeed {
     fn reset(mut self) {
         *self.generation.write() += 1;
         self.verses.set(Vec::new());
-        self.next_page.set(Some(self.source.first_api_page()));
+        let source = *self.source.peek();
+        self.loaded_for.set(Some(source));
+        self.next_page.set(Some(source.first_api_page()));
         self.loading.set(false);
         self.error.set(None);
         self.total.set(None);
@@ -97,7 +104,7 @@ impl VerseFeed {
         let client = self.client.peek().clone();
         let mut q = self.query.peek().with_page(page);
         q.per_page = PER_PAGE;
-        let source = self.source;
+        let source = *self.source.peek();
         spawn(async move {
             let result = source.fetch(&client, &q).await;
             if *self.generation.peek() != generation {
@@ -128,7 +135,7 @@ impl VerseFeed {
     }
 }
 
-fn use_verse_feed(source: VerseSource) -> VerseFeed {
+fn use_verse_feed(source: Memo<VerseSource>) -> VerseFeed {
     let settings = use_settings();
     let query = use_memo(move || settings.read().verse_query());
     // Read the context *before* creating the signal: calling a hook (use_context)
@@ -137,22 +144,24 @@ fn use_verse_feed(source: VerseSource) -> VerseFeed {
     let client = use_signal(move || api);
     let feed = VerseFeed {
         source,
+        loaded_for: use_signal(|| None),
         client,
         query,
         verses: use_signal(Vec::new),
         // Start "loading" so nothing claims the list is complete (or empty) before
         // the mount effect below has started the first request.
-        next_page: use_signal(move || Some(source.first_api_page())),
+        next_page: use_signal(move || Some(source.peek().first_api_page())),
         loading: use_signal(|| true),
         error: use_signal(|| None),
         total: use_signal(|| None),
         merge_issues: use_signal(Vec::new),
         generation: use_signal(|| 0),
     };
-    // Runs on mount and again whenever the verse query (translations, script,
-    // language) changes.
+    // Runs on mount and again whenever the verse query (translations, font,
+    // layout) or the source (navigation to another page/surah/juz) changes.
     use_effect(move || {
         let _ = query.read();
+        let _ = source.read();
         feed.reset();
     });
     feed
@@ -173,6 +182,7 @@ pub(crate) fn VerseList(
     /// Whether the first/last mushaf line may be cut (verse-range views).
     #[props(default)] trim: Trim,
 ) -> Element {
+    let source = use_memo(use_reactive!(|source| source));
     let feed = use_verse_feed(source);
     let chapters = use_chapters();
     let expected = use_memo(use_reactive!(|expected| expected));
@@ -181,6 +191,10 @@ pub(crate) fn VerseList(
     let issues = use_memo(move || {
         // The mushaf always shows Uthmani (QCF glyphs / KFGQPC Hafs text).
         let script_field = "text_uthmani";
+        // Verses still from the previous source (navigation just happened): nothing to check yet.
+        if *feed.loaded_for.read() != Some(source()) {
+            return Vec::new();
+        }
         let complete = (feed.next_page)().is_none() && !(feed.loading)() && (feed.error)().is_none();
         let expected_spans = expected.read();
         let expected: &[(u16, VerseSpan)] = if complete { &expected_spans } else { &[] };
@@ -197,12 +211,15 @@ pub(crate) fn VerseList(
         let issues = issues.read();
         if !issues.is_empty() {
             let list: Vec<String> = issues.iter().map(ToString::to_string).collect();
-            dioxus::logger::tracing::warn!("verse integrity issues ({:?}): {}", source, list.join("; "));
+            dioxus::logger::tracing::warn!("verse integrity issues ({:?}): {}", *source.peek(), list.join("; "));
         }
     });
 
+    // Right after navigation (before the reset effect runs) the old verses are
+    // still in the feed: render as loading rather than flash the previous content.
+    let stale = *feed.loaded_for.read() != Some(source());
     let verses = feed.verses.read();
-    let loading = (feed.loading)();
+    let loading = (feed.loading)() || stale;
     let error = (feed.error)();
     let has_more = (feed.next_page)().is_some();
     let total = (feed.total)();
@@ -282,8 +299,10 @@ pub(crate) fn VerseList(
                 }
             }
         }
-        MushafView { verses: feed.verses, trim }
-        if let Some(message) = error {
+        if !stale {
+            MushafView { verses: feed.verses, trim }
+        }
+        if let Some(message) = error.filter(|_| !stale) {
             div { class: "feed-error",
                 ErrorBox { message: "Could not load verses: {message}" }
                 button {

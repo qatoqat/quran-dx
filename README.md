@@ -77,6 +77,13 @@ in its ayah marker, every word must have text, and no verse in a range may be sk
 verse's word data is incomplete, the full verse text is shown instead and a warning banner
 names the verse. Words never render empty; a visible `⟨?⟩` marks text the API didn't send.
 
+The app also checks what is actually on screen. Whenever a mushaf page scrolls into
+view, every word and ayah marker on it is looked up in the page and must exist exactly
+once, show exactly the expected text, be visible (not hidden, transparent, tiny or
+zero-sized) and, for glyphs, use a page font the browser reports as loaded. A word that
+fails is switched to plain Unicode text with a red ⚠ marker, and the page shows an alert
+listing the affected words — rendering problems are never silent.
+
 These checks need the real API, so they run on your machine:
 
 ```bash

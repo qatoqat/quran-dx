@@ -17,6 +17,7 @@ use quran_api::{Chapter, Verse, VerseQuery};
 use super::fonts::{self, FONTS, use_mushaf_fonts, use_page_font_ready};
 use super::glyph::{self, MISSING_WORD, WordMode};
 use super::mushaf_layout::{FlowReason, Item, PageBlock, Trim, WordCell, build_layout};
+use super::render_audit;
 use super::verse::{CopyVerseButton, strip_html};
 use super::{BISMILLAH, CHAPTERS, chapter_route};
 use crate::settings::wbw::TranslationText;
@@ -144,6 +145,7 @@ pub(crate) fn MushafView(verses: ReadSignal<Vec<Verse>>, #[props(default)] trim:
             for (i, block) in layout.pages.iter().enumerate() {
                 PageView {
                     key: "{block_key(&layout.pages, i)}",
+                    block_id: block_key(&layout.pages, i),
                     block: Rc::clone(block),
                     headers: headers_for(block, chapters),
                     bismillah: if block_has_bismillah(block) { bismillah_verse() } else { None },
@@ -154,6 +156,23 @@ pub(crate) fn MushafView(verses: ReadSignal<Vec<Verse>>, #[props(default)] trim:
             }
         }
     }
+}
+
+fn flow_note(reason: FlowReason, verse_key: &str) -> String {
+    match reason {
+        FlowReason::NoLayout => format!("Mushaf line layout unavailable for {verse_key}; shown as flowing text."),
+        FlowReason::VerseText => format!("Word data incomplete for {verse_key}; showing the full verse text."),
+    }
+}
+
+fn render_error_list(errors: &std::collections::BTreeMap<String, String>) -> String {
+    const SHOWN: usize = 12;
+    let mut s =
+        errors.iter().take(SHOWN).map(|(loc, why)| format!("{loc} ({why})")).collect::<Vec<_>>().join(", ");
+    if errors.len() > SHOWN {
+        s.push_str(&format!(" (+{} more)", errors.len() - SHOWN));
+    }
+    s
 }
 
 fn plural(n: usize) -> &'static str {
@@ -200,6 +219,7 @@ fn verses_for(block: &PageBlock, verses: &[Verse]) -> Vec<Verse> {
 
 #[component]
 fn PageView(
+    block_id: String,
     block: Rc<PageBlock>,
     headers: Vec<Chapter>,
     bismillah: Option<Verse>,
@@ -211,13 +231,63 @@ fn PageView(
     let bismillah_ready = use_page_font_ready(font, Some(1));
     let family = block.page.map(|p| font.family(p)).unwrap_or_default();
     let page_attr = block.page.map(|p| p.to_string());
+
+    // Built-in render audit (see render_audit.rs): words that failed it are
+    // forced to plain Unicode text and get a visible error marker.
+    let mut visible = use_signal(|| false);
+    let mut render_errors = use_signal(std::collections::BTreeMap::<String, String>::new);
+    let errors_now = render_errors.read().clone();
     let mode_of = |c: &WordCell| {
-        let ready = ready && c.page.is_some() && c.page == block.page;
+        let failed = errors_now.contains_key(&c.location);
+        let ready = ready && !failed && c.page.is_some() && c.page == block.page;
         glyph::choose_mode(c.glyph.as_deref(), c.text.as_deref(), ready, &family)
     };
+    let expected = render_audit::expectations(&block, mode_of);
+    {
+        let block_id = block_id.clone();
+        use_effect(use_reactive!(|expected| {
+            if !visible() {
+                return;
+            }
+            let block_id = block_id.clone();
+            spawn(async move {
+                let Some(failures) = render_audit::run(&block_id, &expected).await else { return };
+                let mut changed = false;
+                let mut map = render_errors.peek().clone();
+                for render_audit::Failure(loc, reason) in failures {
+                    if map.get(&loc) != Some(&reason) {
+                        if !map.contains_key(&loc) {
+                            dioxus::logger::tracing::error!("word {loc} did not render correctly: {reason}");
+                        }
+                        map.insert(loc, reason);
+                        changed = true;
+                    }
+                }
+                if changed {
+                    render_errors.set(map);
+                }
+            });
+        }));
+    }
 
     rsx! {
-        section { class: "mushaf-page", "data-page": page_attr.clone(),
+        section {
+            class: "mushaf-page",
+            "data-page": page_attr.clone(),
+            "data-block": "{block_id}",
+            onvisible: move |e: VisibleEvent| {
+                let now = e.is_intersecting().unwrap_or(false);
+                if *visible.peek() != now {
+                    visible.set(now);
+                }
+            },
+            if !errors_now.is_empty() {
+                div { class: "render-error-banner", role: "alert", dir: "ltr", lang: "en",
+                    strong { "⚠ {errors_now.len()} word{plural(errors_now.len())} on this page did not display correctly" }
+                    {if errors_now.len() == 1 { " and is now shown as plain text, marked ⚠: " } else { " and are now shown as plain text, marked ⚠: " }}
+                    {render_error_list(&errors_now)}
+                }
+            }
             div { class: "mushaf-page-scroll",
                 div { class: "mushaf-lines", dir: "rtl", lang: "ar",
                     for (i, item) in block.items.iter().enumerate() {
@@ -245,7 +315,7 @@ fn PageView(
                                     "data-page": page_attr.clone(),
                                     "data-line": "{line}",
                                     for c in cells.iter() {
-                                        Fragment { key: "{c.location}", {mushaf_word(c, mode_of(c), wbw)} }
+                                        Fragment { key: "{c.location}", {mushaf_word(c, mode_of(c), wbw, errors_now.get(&c.location))} }
                                     }
                                 }
                             },
@@ -259,14 +329,11 @@ fn PageView(
                                         FlowReason::VerseText => "verse-text",
                                     },
                                     p { class: "mushaf-flow-note", dir: "ltr", lang: "en",
-                                        match reason {
-                                            FlowReason::NoLayout => "Mushaf line layout unavailable for {verse_key}; shown as flowing text.",
-                                            FlowReason::VerseText => "Word data incomplete for {verse_key}; showing the full verse text.",
-                                        }
+                                        {flow_note(*reason, verse_key)}
                                     }
                                     div { class: "mushaf-line flowing",
                                         for c in cells.iter() {
-                                            Fragment { key: "{c.location}", {mushaf_word(c, mode_of(c), wbw)} }
+                                            Fragment { key: "{c.location}", {mushaf_word(c, mode_of(c), wbw, errors_now.get(&c.location))} }
                                         }
                                     }
                                 }
@@ -292,7 +359,22 @@ fn PageView(
 /// A plain function, not a component: a juz has thousands of words, and a scope
 /// plus a signal per word cost memory for no benefit. The tooltip (hover mode) is
 /// CSS-only: shown on hover and on focus (tap or Tab focuses the word).
-fn mushaf_word(cell: &WordCell, mode: WordMode, wbw: WbwOpts) -> Element {
+fn mushaf_word(cell: &WordCell, mode: WordMode, wbw: WbwOpts, render_error: Option<&String>) -> Element {
+    // Visible marker for a word that failed the render audit (outside `.word-text`,
+    // in a plain system font, so it can't be hidden by the problem it reports).
+    let error_badge = render_error.map(|reason| {
+        rsx! {
+            span {
+                class: "word-render-error",
+                role: "img",
+                lang: "en",
+                dir: "ltr",
+                title: "This word did not display correctly ({reason}); shown as plain text.",
+                "aria-label": "display problem: {reason}",
+                "⚠"
+            }
+        }
+    });
     let page = cell.page.map(|p| p.to_string());
     let line = cell.line.map(|l| l.to_string());
     let anchor = cell.anchor.map(|count| {
@@ -335,6 +417,7 @@ fn mushaf_word(cell: &WordCell, mode: WordMode, wbw: WbwOpts) -> Element {
                 "data-mode": mode.attr(),
                 role: "img",
                 "aria-label": "end of verse {n}",
+                {error_badge}
                 {text}
                 if wbw.inline() && wbw.translation {
                     span { class: "ayah-number", lang: "en", dir: "ltr", "({n})" }
@@ -369,6 +452,7 @@ fn mushaf_word(cell: &WordCell, mode: WordMode, wbw: WbwOpts) -> Element {
                 "data-mode": mode.attr(),
                 tabindex: 0,
                 "aria-describedby": "{tip_id}",
+                {error_badge}
                 {text}
                 span { class: "word-tooltip", id: "{tip_id}", role: "tooltip", {extras} }
             }
@@ -383,6 +467,7 @@ fn mushaf_word(cell: &WordCell, mode: WordMode, wbw: WbwOpts) -> Element {
             "data-page": page,
             "data-line": line,
             "data-mode": mode.attr(),
+            {error_badge}
             {text}
             if wbw.inline() {
                 {extras}
@@ -395,17 +480,18 @@ fn mushaf_word(cell: &WordCell, mode: WordMode, wbw: WbwOpts) -> Element {
 #[component]
 fn SurahHeaderLine(chapter: u16, info: Option<Chapter>) -> Element {
     let to = chapter_route(chapter, None);
-    let (arabic, latin) = match &info {
-        Some(c) => (c.name_arabic.clone(), format!("Surah {}", c.name_simple)),
+    let (arabic, label) = match &info {
+        Some(c) => (format!("سورة {}", c.name_arabic), format!("Surah {}", c.name_simple)),
         None => (String::new(), format!("Surah {chapter}")),
     };
     rsx! {
         div { class: "surah-header-line", "data-chapter": "{chapter}",
-            Link { class: "surah-header-frame", to,
-                if !arabic.is_empty() {
+            Link { class: "surah-header-frame", to, title: "{label}", "aria-label": "{label}",
+                if arabic.is_empty() {
+                    span { class: "surah-header-fallback", lang: "en", dir: "ltr", "{label}" }
+                } else {
                     span { class: "surah-header-arabic", lang: "ar", dir: "rtl", "{arabic}" }
                 }
-                span { class: "surah-header-latin", lang: "en", dir: "ltr", "{latin}" }
             }
         }
     }
@@ -477,5 +563,48 @@ fn PageTranslations(verses: Vec<Verse>) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell(is_end: bool) -> WordCell {
+        WordCell {
+            location: "114:1:2".into(),
+            verse_key: "114:1".into(),
+            verse_number: 1,
+            page: Some(604),
+            line: Some(2),
+            is_end,
+            glyph: Some("\u{FB51}".into()),
+            text: Some("بِرَبِّ".into()),
+            translation: Some("in (the) Lord".into()),
+            transliteration: None,
+            anchor: None,
+        }
+    }
+
+    fn html(cell: &WordCell, mode: WordMode, tooltip: bool, error: Option<&String>) -> String {
+        let wbw = WbwOpts { translation: true, transliteration: false, tooltip };
+        dioxus_ssr::render_element(mushaf_word(cell, mode, wbw, error))
+    }
+
+    #[test]
+    fn audit_failure_shows_a_visible_marker_and_keeps_the_text() {
+        let reason = "zero size".to_string();
+        for tooltip in [false, true] {
+            let out = html(&cell(false), WordMode::Text("بِرَبِّ".into()), tooltip, Some(&reason));
+            assert!(out.contains("word-render-error"), "{out}");
+            assert!(out.contains("⚠") && out.contains("zero size"), "{out}");
+            // The word's own text is still there, in its own element.
+            assert!(out.contains(r#"<span class="word-text unicode-text">بِرَبِّ</span>"#), "{out}");
+        }
+        let marker = html(&cell(true), WordMode::Text("x".into()), false, Some(&reason));
+        assert!(marker.contains("ayah-marker") && marker.contains("word-render-error"), "{marker}");
+        // No failure → no marker.
+        let ok = html(&cell(false), WordMode::Text("بِرَبِّ".into()), false, None);
+        assert!(!ok.contains("word-render-error"), "{ok}");
     }
 }

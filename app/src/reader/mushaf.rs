@@ -23,7 +23,7 @@ pub fn MushafPage(page: u16) -> Element {
 
 #[component]
 fn PageView(page: u16) -> Element {
-    use_scroll_to_top();
+    use_scroll_to_top(page);
     let prev = (page > 1).then(|| (Route::MushafPage { page: page - 1 }, format!("Page {}", page - 1)));
     let next =
         (page < MUSHAF_PAGES).then(|| (Route::MushafPage { page: page + 1 }, format!("Page {}", page + 1)));
@@ -55,7 +55,7 @@ pub fn JuzPage(juz: u8) -> Element {
 
 #[component]
 fn JuzView(juz: u8) -> Element {
-    use_scroll_to_top();
+    use_scroll_to_top(juz);
     // The juz's verse ranges per surah, so a missing verse at either end of the juz
     // (where the page-to-page checks can't see it) is still reported.
     let client = crate::use_api();
@@ -63,14 +63,15 @@ fn JuzView(juz: u8) -> Element {
         let client = client.clone();
         async move { client.juzs().await.ok() }
     });
-    let expected = use_memo(move || match &*juzs.read() {
+    // `juz` via use_reactive: the view is reused when navigating juz → juz.
+    let expected = use_memo(use_reactive!(|juz| match &*juzs.read() {
         Some(Some(list)) => list
             .iter()
             .find(|j| j.juz_number == juz)
             .map(|j| super::parse::juz_mapping(&j.verse_mapping))
             .unwrap_or_default(),
         _ => Vec::new(),
-    });
+    }));
     let prev = (juz > 1).then(|| (Route::JuzPage { juz: juz - 1 }, format!("Juz {}", juz - 1)));
     let next = (juz < JUZ_COUNT).then(|| (Route::JuzPage { juz: juz + 1 }, format!("Juz {}", juz + 1)));
     rsx! {

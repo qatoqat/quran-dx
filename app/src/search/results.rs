@@ -38,11 +38,17 @@ fn SearchResults(q: String) -> Element {
     let mut page = use_signal(|| 1u32);
 
     let query = q.trim().to_string();
+    // The component is reused when the query changes (a new search from this
+    // page), so the query must be a reactive input, and paging restarts at 1.
+    let query_sig = use_memo(use_reactive!(|query| query));
+    use_effect(move || {
+        let _ = query_sig.read();
+        page.set(1);
+    });
     let results = use_resource({
-        let query = query.clone();
         move || {
             let client = client.clone();
-            let query = query.clone();
+            let query = query_sig();
             let page = page();
             let locale = settings.read().locale.clone();
             async move {

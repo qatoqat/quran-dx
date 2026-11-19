@@ -28,6 +28,7 @@ mod mushaf;
 pub mod mushaf_layout;
 pub(crate) mod mushaf_view;
 pub mod parse;
+pub mod render_audit;
 pub mod verse;
 
 pub use chapter::{ChapterPage, ChapterRange};
@@ -68,17 +69,20 @@ pub(crate) fn find_chapter(list: &[Chapter], id: u16) -> Option<&Chapter> {
 /// Render it with a `key` derived from the target so it re-runs on change.
 #[component]
 pub(crate) fn Redirect(to: Route) -> Element {
-    use_effect(move || {
-        navigator().replace(to.clone());
-    });
+    // Reactive on `to`: a reused Redirect with a new target must navigate again.
+    use_effect(use_reactive!(|to| {
+        navigator().replace(to);
+    }));
     rsx! { crate::layout::Loading {} }
 }
 
-/// Scroll the window to the top once when the calling component mounts.
-pub(crate) fn use_scroll_to_top() {
-    use_hook(|| {
+/// Scroll the window to the top when the calling view mounts and whenever `key`
+/// changes (views are reused when navigating page → page, surah → surah).
+pub(crate) fn use_scroll_to_top<K: PartialEq + Clone + 'static>(key: K) {
+    use_effect(use_reactive!(|key| {
+        let _ = key;
         document::eval("window.scrollTo(0, 0);");
-    });
+    }));
 }
 
 /// Route for a chapter, optionally narrowed to a span of verses.

@@ -183,10 +183,33 @@
 .surah-header-frame::before { right: .6em; }
 .surah-header-frame::after { left: .6em; }
 .surah-header-frame:hover { text-decoration: none; border-color: var(--accent); }
-.surah-header-arabic { font-family: var(--quran-fallback-font); font-size: .62em; line-height: 1.5; }
-.surah-header-latin {
+/* Surah name in Arabic Naskh, as printed in the mushaf banner: "سورة الناس". */
+.surah-header-arabic {
+  font-family: "UthmanicHafs", "KFGQPC Uthmanic Script HAFS", "Noto Naskh Arabic", "Amiri", serif;
+  font-size: .85em; line-height: 1.6; font-weight: 400; letter-spacing: 0;
+}
+.surah-header-fallback {
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; direction: ltr;
-  font-size: .9rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+  font-size: .9rem; font-weight: 600; color: var(--muted);
+}
+
+/* ---------- Built-in render audit ---------- */
+/* A word that failed the on-screen check: shown as plain text with a red mark in
+   a plain system font, so the mark itself can't be hidden by the same problem. */
+.word-render-error {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: max(.9rem, .3em); line-height: 1; color: #fff; background: #c62828;
+  border-radius: 999px; padding: .1em .35em; margin-inline: .1em; vertical-align: super;
+  visibility: visible; opacity: 1;
+}
+.word:has(.word-render-error) .word-text,
+.ayah-marker:has(.word-render-error) .word-text { outline: 2px dashed #c62828; outline-offset: 2px; border-radius: 3px; }
+.render-error-banner {
+  margin: 0 0 .8rem; padding: .7rem .9rem; border-radius: 8px; font-size: .92rem; line-height: 1.5;
+  color: #7f1d1d; background: #fee2e2; border: 1px solid #ef4444;
+}
+@media (prefers-color-scheme: dark) {
+  .render-error-banner { color: #fecaca; background: #3b1212; border-color: #b91c1c; }
 }
 
 /* Bismillah line (verse 1:1's glyphs, page-1 font) with its meaning. */

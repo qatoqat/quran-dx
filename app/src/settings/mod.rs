@@ -201,7 +201,8 @@ pub fn use_settings() -> Signal<Settings> {
 
 /// Google Fonts stylesheet for Amiri Quran, the last-resort Arabic fallback
 /// (browsers only download it if no earlier face in the stack has the glyphs).
-const GOOGLE_FONTS_CSS: &str = "https://fonts.googleapis.com/css2?family=Amiri+Quran&display=swap";
+const GOOGLE_FONTS_CSS: &str =
+    "https://fonts.googleapis.com/css2?family=Amiri+Quran&family=Noto+Naskh+Arabic:wght@400;600&display=swap";
 
 /// `--arabic-font`: fallback stack for Arabic text outside the QCF page fonts
 /// (the reader registers the `UthmanicHafs` face and the per-page QCF faces).

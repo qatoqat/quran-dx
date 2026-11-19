@@ -213,7 +213,10 @@ async function rendered(page) {
       return { chapter: Number(h.dataset.chapter), bismillah, next: next?.dataset?.location ?? null };
     });
     const missingPlaceholders = document.querySelectorAll(".word-missing").length;
-    return { anchors, words, markers, headers, missingPlaceholders };
+    // The app's own on-screen audit (render_audit.rs) marks failed words.
+    const auditFailures = [...document.querySelectorAll(".word-render-error")].map((b) =>
+      `${b.closest("[data-location]")?.dataset.location ?? "?"}: ${b.getAttribute("aria-label") ?? ""}`);
+    return { anchors, words, markers, headers, missingPlaceholders, auditFailures };
   });
 }
 
@@ -228,7 +231,8 @@ async function checkView(page, view) {
   // Give page fonts a moment so glyph mode can kick in before we read the DOM.
   await page.evaluate(() => document.fonts.ready).catch(() => {});
   await sleep(500);
-  const { anchors, words, markers, headers, missingPlaceholders } = await rendered(page);
+  const { anchors, words, markers, headers, missingPlaceholders, auditFailures } = await rendered(page);
+  for (const f of auditFailures) problems.push({ at, kind: "app-render-audit", detail: f });
   const familyFor = (p) => (FONT === "plain" ? `p${p}-v2` : `p${p}-v4`);
 
   if (await page.locator(".integrity-banner").count()) {

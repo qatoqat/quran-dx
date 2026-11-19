@@ -7,6 +7,8 @@ use crate::search::SearchBox;
 
 #[component]
 pub fn Shell() -> Element {
+    #[cfg(test)]
+    crate::mount_tests::use_test_navigation();
     rsx! {
         header { class: "site-header",
             Link { class: "brand", to: Route::Home {}, "The Noble Quran" }
